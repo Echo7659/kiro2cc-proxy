@@ -166,7 +166,7 @@ pub(crate) async fn refresh_token(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<KiroCredentials> {
-    validate_refresh_token(credentials)?;
+    let credentials = prepare_refresh_credentials(credentials, config)?;
 
     // 根据 auth_method 选择刷新方式
     // 如果未指定 auth_method，根据是否有 clientId/clientSecret 自动判断
@@ -182,11 +182,57 @@ pub(crate) async fn refresh_token(
         || auth_method.eq_ignore_ascii_case("builder-id")
         || auth_method.eq_ignore_ascii_case("iam")
     {
-        refresh_idc_token(credentials, config, proxy).await
+        refresh_idc_token(&credentials, config, proxy).await
     } else if auth_method.eq_ignore_ascii_case("external_idp") {
-        refresh_external_idp_token(credentials, config, proxy).await
+        refresh_external_idp_token(&credentials, config, proxy).await
     } else {
-        refresh_social_token(credentials, config, proxy).await
+        refresh_social_token(&credentials, config, proxy).await
+    }
+}
+
+fn prepare_refresh_credentials(
+    credentials: &KiroCredentials,
+    config: &Config,
+) -> anyhow::Result<KiroCredentials> {
+    let mut credentials = credentials.clone();
+    machine_id::ensure_fixed_machine_id(&mut credentials, config);
+    validate_refresh_token(&credentials)?;
+    Ok(credentials)
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_preparation_pins_identity_before_validation_and_rotation() {
+        let mut config = Config::default();
+        config.machine_id = Some("a".repeat(64));
+        let credentials = KiroCredentials {
+            refresh_token: Some("original-token-".repeat(10)),
+            machine_id: Some("invalid-imported-id".to_string()),
+            ..Default::default()
+        };
+        let expected_id = machine_id::generate_from_credentials(&credentials, &config);
+        let mut prepared = prepare_refresh_credentials(&credentials, &config).unwrap();
+        assert_eq!(prepared.machine_id.as_deref(), Some(expected_id.as_str()));
+
+        let response = IdcRefreshResponse {
+            access_token: "synthetic-access-token".to_string(),
+            id_token: None,
+            refresh_token: Some("rotated-token-".repeat(10)),
+            expires_in: Some(3600),
+        };
+        apply_idc_refresh_response(&mut prepared, response);
+        let prepared_again = prepare_refresh_credentials(&prepared, &config).unwrap();
+        assert_eq!(
+            prepared_again.machine_id.as_deref(),
+            Some(expected_id.as_str())
+        );
+        assert_eq!(
+            prepared_again.refresh_token,
+            Some("rotated-token-".repeat(10))
+        );
     }
 }
 

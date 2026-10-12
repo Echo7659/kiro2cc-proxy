@@ -150,6 +150,30 @@ pub struct Config {
     #[serde(default = "default_max_rpm_per_credential")]
     pub max_rpm_per_credential: u32,
 
+    /// 全局生成并发上限，许可覆盖完整上游响应体。
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+
+    /// 单账号生成并发上限，许可覆盖完整上游响应体。
+    #[serde(default = "default_max_concurrent_per_credential")]
+    pub max_concurrent_per_credential: usize,
+
+    /// 等待限流/并发准入的最长时间；超时返回 429。
+    #[serde(default = "default_upstream_admission_timeout_secs")]
+    pub upstream_admission_timeout_secs: u64,
+
+    /// 自动禁用后的首次验活等待时间。
+    #[serde(default = "default_account_recovery_cooldown_secs")]
+    pub account_recovery_cooldown_secs: u64,
+
+    /// 验活失败后指数退避的最大等待时间。
+    #[serde(default = "default_account_recovery_max_cooldown_secs")]
+    pub account_recovery_max_cooldown_secs: u64,
+
+    /// 单次只读账号验活的总超时。
+    #[serde(default = "default_account_recovery_probe_timeout_secs")]
+    pub account_recovery_probe_timeout_secs: u64,
+
     /// `/v1/models` 动态列表缓存 TTL（秒），默认 3600
     #[serde(default = "default_model_cache_ttl_secs")]
     pub model_cache_ttl_secs: u64,
@@ -216,9 +240,32 @@ fn default_kiro_version() -> String {
     "2.2.2".to_string()
 }
 
-// 0 = 关闭单账号 RPM 硬限（仅依赖上游 429 + throttle_delay 兜底）
 fn default_max_rpm_per_credential() -> u32 {
-    0
+    10
+}
+
+fn default_max_concurrent_requests() -> usize {
+    20
+}
+
+fn default_max_concurrent_per_credential() -> usize {
+    2
+}
+
+fn default_upstream_admission_timeout_secs() -> u64 {
+    30
+}
+
+fn default_account_recovery_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_account_recovery_max_cooldown_secs() -> u64 {
+    3600
+}
+
+fn default_account_recovery_probe_timeout_secs() -> u64 {
+    30
 }
 
 fn default_system_version() -> String {
@@ -267,6 +314,12 @@ impl Default for Config {
             admin_psw: None,
             load_balancing_mode: default_load_balancing_mode(),
             max_rpm_per_credential: default_max_rpm_per_credential(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            max_concurrent_per_credential: default_max_concurrent_per_credential(),
+            upstream_admission_timeout_secs: default_upstream_admission_timeout_secs(),
+            account_recovery_cooldown_secs: default_account_recovery_cooldown_secs(),
+            account_recovery_max_cooldown_secs: default_account_recovery_max_cooldown_secs(),
+            account_recovery_probe_timeout_secs: default_account_recovery_probe_timeout_secs(),
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
             cache_simulation: CacheSimulationConfig::default(),
             client_token_passthrough: false,
@@ -309,7 +362,53 @@ impl Config {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         config.config_path = Some(path.to_path_buf());
+        config.validate_account_protection()?;
         Ok(config)
+    }
+
+    /// 在启动前拒绝会使保护失效或使计时溢出的配置。
+    pub fn validate_account_protection(&self) -> anyhow::Result<()> {
+        for (name, limit) in [
+            ("maxConcurrentRequests", self.max_concurrent_requests),
+            (
+                "maxConcurrentPerCredential",
+                self.max_concurrent_per_credential,
+            ),
+        ] {
+            anyhow::ensure!(
+                limit > 0 && limit <= tokio::sync::Semaphore::MAX_PERMITS,
+                "{name} must be between 1 and {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
+        for (name, seconds) in [
+            (
+                "upstreamAdmissionTimeoutSecs",
+                self.upstream_admission_timeout_secs,
+            ),
+            (
+                "accountRecoveryCooldownSecs",
+                self.account_recovery_cooldown_secs,
+            ),
+            (
+                "accountRecoveryMaxCooldownSecs",
+                self.account_recovery_max_cooldown_secs,
+            ),
+            (
+                "accountRecoveryProbeTimeoutSecs",
+                self.account_recovery_probe_timeout_secs,
+            ),
+        ] {
+            anyhow::ensure!(
+                seconds > 0 && seconds <= 604_800,
+                "{name} must be between 1 and 604800 seconds"
+            );
+        }
+        anyhow::ensure!(
+            self.account_recovery_max_cooldown_secs >= self.account_recovery_cooldown_secs,
+            "accountRecoveryMaxCooldownSecs must be at least accountRecoveryCooldownSecs"
+        );
+        Ok(())
     }
 
     /// 获取配置文件路径（如果有）
@@ -330,6 +429,11 @@ impl Config {
     /// - `PROXY_USERNAME`: 代理用户名
     /// - `PROXY_PASSWORD`: 代理密码
     /// - `LOAD_BALANCING_MODE`: 负载均衡模式
+    /// - `MAX_RPM_PER_CREDENTIAL`: 单账号每分钟转发尝试上限（0 = 不限）
+    /// - `MAX_CONCURRENT_REQUESTS` / `MAX_CONCURRENT_PER_CREDENTIAL`: 完整响应生命周期的并发上限
+    /// - `UPSTREAM_ADMISSION_TIMEOUT_SECS`: 准入等待上限
+    /// - `ACCOUNT_RECOVERY_COOLDOWN_SECS` / `ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS`: 验活冷却/退避上限
+    /// - `ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS`: 验活超时
     /// - `MODEL_CACHE_TTL_SECS`: /v1/models 动态列表缓存 TTL（秒）
     /// - `CLIENT_TOKEN_PASSTHROUGH`: 客户端 token 直通开关
     /// - `FORWARD_SUGGESTION_MODE`: Suggestion Mode 输入建议请求放行开关
@@ -367,6 +471,45 @@ impl Config {
         }
         if let Ok(v) = env::var("LOAD_BALANCING_MODE") {
             self.load_balancing_mode = v;
+        }
+        if let Ok(v) = env::var("MAX_RPM_PER_CREDENTIAL")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            self.max_rpm_per_credential = n;
+        }
+        if let Ok(v) = env::var("MAX_CONCURRENT_REQUESTS")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.max_concurrent_requests = n;
+        }
+        if let Ok(v) = env::var("MAX_CONCURRENT_PER_CREDENTIAL")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.max_concurrent_per_credential = n;
+        }
+        for (name, target) in [
+            (
+                "UPSTREAM_ADMISSION_TIMEOUT_SECS",
+                &mut self.upstream_admission_timeout_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_COOLDOWN_SECS",
+                &mut self.account_recovery_cooldown_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS",
+                &mut self.account_recovery_max_cooldown_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS",
+                &mut self.account_recovery_probe_timeout_secs,
+            ),
+        ] {
+            if let Ok(v) = env::var(name)
+                && let Ok(seconds) = v.parse::<u64>()
+            {
+                *target = seconds;
+            }
         }
         if let Ok(v) = env::var("MODEL_CACHE_TTL_SECS")
             && let Ok(n) = v.parse::<u64>()
@@ -427,6 +570,92 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_protection_defaults_apply_to_existing_configs() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_rpm_per_credential, 10);
+        assert_eq!(config.max_concurrent_requests, 20);
+        assert_eq!(config.max_concurrent_per_credential, 2);
+        assert_eq!(config.upstream_admission_timeout_secs, 30);
+        assert_eq!(config.account_recovery_cooldown_secs, 300);
+        assert_eq!(config.account_recovery_max_cooldown_secs, 3600);
+        assert_eq!(config.account_recovery_probe_timeout_secs, 30);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn account_protection_rejects_disabled_concurrency_and_unbounded_timers() {
+        for field in ["maxConcurrentRequests", "maxConcurrentPerCredential"] {
+            let config: Config = serde_json::from_value(serde_json::json!({field: 0})).unwrap();
+            assert!(config.validate_account_protection().is_err(), "{field}");
+        }
+        for field in [
+            "upstreamAdmissionTimeoutSecs",
+            "accountRecoveryCooldownSecs",
+            "accountRecoveryMaxCooldownSecs",
+            "accountRecoveryProbeTimeoutSecs",
+        ] {
+            for invalid in [0, 604_801, u64::MAX] {
+                let config: Config =
+                    serde_json::from_value(serde_json::json!({field: invalid})).unwrap();
+                assert!(
+                    config.validate_account_protection().is_err(),
+                    "{field}={invalid}"
+                );
+            }
+        }
+        let config = Config {
+            account_recovery_cooldown_secs: 600,
+            account_recovery_max_cooldown_secs: 300,
+            ..Config::default()
+        };
+        assert!(config.validate_account_protection().is_err());
+    }
+
+    #[test]
+    fn explicit_unlimited_rpm_is_preserved_without_disabling_concurrency() {
+        let config: Config = serde_json::from_str(r#"{"maxRpmPerCredential":0}"#).unwrap();
+        assert_eq!(config.max_rpm_per_credential, 0);
+        assert_eq!(config.max_concurrent_per_credential, 2);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn account_protection_environment_overrides_are_validated() {
+        const CHILD: &str = "KIRO_ACCOUNT_PROTECTION_ENV_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let mut config = Config::default();
+            config.apply_env_overrides();
+            assert_eq!(config.max_rpm_per_credential, 6);
+            assert_eq!(config.max_concurrent_requests, 8);
+            assert_eq!(config.max_concurrent_per_credential, 1);
+            assert_eq!(config.upstream_admission_timeout_secs, 12);
+            assert_eq!(config.account_recovery_cooldown_secs, 600);
+            assert_eq!(config.account_recovery_max_cooldown_secs, 1800);
+            assert_eq!(config.account_recovery_probe_timeout_secs, 15);
+            config.validate_account_protection().unwrap();
+            config.max_concurrent_requests = 0;
+            assert!(config.validate_account_protection().is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::config::tests::account_protection_environment_overrides_are_validated",
+            ])
+            .env(CHILD, "1")
+            .env("MAX_RPM_PER_CREDENTIAL", "6")
+            .env("MAX_CONCURRENT_REQUESTS", "8")
+            .env("MAX_CONCURRENT_PER_CREDENTIAL", "1")
+            .env("UPSTREAM_ADMISSION_TIMEOUT_SECS", "12")
+            .env("ACCOUNT_RECOVERY_COOLDOWN_SECS", "600")
+            .env("ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS", "1800")
+            .env("ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS", "15")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn test_model_cache_ttl_default() {

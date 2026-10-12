@@ -26,12 +26,6 @@ pub(crate) const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 /// 总重试次数硬上限（避免无限重试）
 pub(crate) const MAX_TOTAL_RETRIES: usize = 9;
 
-/// 最大并发请求数（同时发往上游的请求上限）
-pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 50;
-
-/// 单账号最大并发请求数
-pub(crate) const MAX_CONCURRENT_PER_CREDENTIAL: usize = 20;
-
 /// 所有上游 API 请求统一使用的 HTTP 总超时（秒）。
 ///
 /// 历史上曾按请求类型分档：压缩请求 1000s（历史修复 commit 9338888，大上下文
@@ -72,6 +66,8 @@ pub struct KiroProvider {
     pub(crate) failure_log_store: Option<Arc<FailureLogStore>>,
     /// 端点级 429 状态注册表（多端点 LB 使用）
     pub(crate) endpoint_registry: Arc<EndpointBucketRegistry>,
+    #[cfg(test)]
+    pub(crate) upstream_url_override: Option<String>,
 }
 
 #[allow(dead_code)] // 拆分自原 provider.rs：部分方法仅测试/预留使用
@@ -90,17 +86,20 @@ impl KiroProvider {
         let mut cache = HashMap::new();
         cache.insert((proxy.clone(), false), initial_client);
 
+        let max_concurrent_requests = token_manager.config().max_concurrent_requests;
         Self {
             token_manager,
             global_proxy: proxy,
             client_cache: Mutex::new(cache),
             tls_backend,
-            concurrency_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            concurrency_limit: Arc::new(Semaphore::new(max_concurrent_requests)),
             credential_semaphores: Mutex::new(HashMap::new()),
-            rpm_tracker: None,
+            rpm_tracker: Some(Arc::new(RpmTracker::new())),
             throttle_log_store: None,
             failure_log_store: None,
             endpoint_registry: Arc::new(EndpointBucketRegistry::new()),
+            #[cfg(test)]
+            upstream_url_override: None,
         }
     }
 
@@ -159,7 +158,11 @@ impl KiroProvider {
     pub(crate) fn semaphore_for(&self, credential_id: u64) -> Arc<tokio::sync::Semaphore> {
         let mut map = self.credential_semaphores.lock();
         map.entry(credential_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PER_CREDENTIAL)))
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Semaphore::new(
+                    self.token_manager.config().max_concurrent_per_credential,
+                ))
+            })
             .clone()
     }
 
@@ -198,11 +201,19 @@ impl KiroProvider {
         _credentials: &KiroCredentials,
         endpoint: &Endpoint,
     ) -> String {
+        #[cfg(test)]
+        if let Some(url) = &self.upstream_url_override {
+            return url.clone();
+        }
         format!("https://{}/generateAssistantResponse", endpoint.host)
     }
 
     /// 获取账号级 MCP API URL（MCP 端点不走多端点 LB）
     pub(crate) fn mcp_url_for(&self, credentials: &KiroCredentials) -> String {
+        #[cfg(test)]
+        if let Some(url) = &self.upstream_url_override {
+            return url.clone();
+        }
         format!(
             "https://q.{}.amazonaws.com/mcp",
             credentials.effective_api_region(self.token_manager.config())

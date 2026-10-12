@@ -226,7 +226,7 @@ pub(crate) fn deadline_error_event() -> SseEvent {
 
 /// 创建 SSE 事件流
 fn create_sse_stream(
-    response: reqwest::Response,
+    response: crate::kiro::provider::UpstreamResponse,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
     deadline: Option<Instant>,
@@ -508,7 +508,7 @@ fn create_sse_stream(
                                         bridge,
                                         Some(round_bridge_ctx),
                                         provider,
-                                        Some((handle, result_tool_use_id)),
+                                        Some((super::bridge::AbortOnDropTask(handle), result_tool_use_id)),
                                     ),
                                 ));
                                 }

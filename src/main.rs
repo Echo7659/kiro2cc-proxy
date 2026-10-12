@@ -64,6 +64,10 @@ async fn main() {
     // 环境变量覆盖配置（用于容器化部署）
     let mut config = config;
     config.apply_env_overrides();
+    config.validate_account_protection().unwrap_or_else(|e| {
+        tracing::error!("账号保护配置无效: {}", e);
+        std::process::exit(1);
+    });
 
     // 客户端 token 直通开关（true 时 usage 字段 1:1 上报，见 Issue #44）
     anthropic::set_client_token_passthrough(config.client_token_passthrough);
@@ -136,6 +140,18 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
+
+    // 只读验活：冷却到期才探测，成功后才重新加入账号池。
+    // 每个实例只有一个后台循环，管理器还会防止重复探测和管理员操作竞态。
+    let recovery_manager = token_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            recovery_manager.recover_due_accounts().await;
+        }
+    });
 
     // 创建 RPM 追踪器
     let rpm_tracker = Arc::new(model::rpm::RpmTracker::new());

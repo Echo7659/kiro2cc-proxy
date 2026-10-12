@@ -367,7 +367,7 @@ pub(crate) fn build_search_tool_result(
 #[allow(clippy::large_enum_variant)] // 变体大小差异是桥接语义所需（Failed 不携带流）
 pub(crate) enum BridgeRoundOutcome {
     Continued(
-        reqwest::Response,
+        crate::kiro::provider::UpstreamResponse,
         EventStreamDecoder,
         Option<websearch::WebSearchResults>,
     ),
@@ -382,10 +382,36 @@ pub(crate) enum BridgeRoundOutcome {
 /// ping/deadline 分支照常就绪触发——桥接轮执行期间下游心跳不再中断，
 /// 且耗尽的 body_stream 借条件前置不再被 poll（避免 flatten 重入误收尾）。
 pub(crate) type InFlightRound = (
-    tokio::task::JoinHandle<(BridgeState, BridgeRoundOutcome)>,
+    AbortOnDropTask<(BridgeState, BridgeRoundOutcome)>,
     // 本轮对应的 web_search tool_use_id（轮次完成后构建配对结果块用）
     String,
 );
+
+/// A dropped downstream SSE must cancel its background MCP/continuation task as well.
+/// Dropping a bare JoinHandle detaches it and would keep upstream capacity occupied.
+pub(crate) struct AbortOnDropTask<T>(pub(crate) tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDropTask<T> {
+    pub(crate) fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDropTask<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// 执行一轮桥接：MCP 真实搜索 → 构建续请求 → 发起续流（D3/D4/D8）
 ///
@@ -490,7 +516,7 @@ pub(crate) async fn bridge_execute_round_owned(
 /// error 事件收尾（finished = true）；后台任务 panic 兜底复用 `Failed(None)`。
 pub(crate) struct BridgeRoundHarvest {
     pub(crate) events: Vec<SseEvent>,
-    pub(crate) new_body_stream: reqwest::Response,
+    pub(crate) new_body_stream: crate::kiro::provider::UpstreamResponse,
     pub(crate) new_decoder: EventStreamDecoder,
     pub(crate) finished: bool,
 }
@@ -520,7 +546,8 @@ pub(crate) fn harvest_bridge_round(
             // 原值不再被消费（decoder 原样带回占位）
             BridgeRoundHarvest {
                 events,
-                new_body_stream: reqwest::Response::from(http::Response::new(body_dummy_bytes())),
+                new_body_stream: reqwest::Response::from(http::Response::new(body_dummy_bytes()))
+                    .into(),
                 new_decoder: EventStreamDecoder::new(),
                 finished: true,
             }

@@ -503,7 +503,13 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `proxyPassword` | 否 | — | 代理密码 |
 | `tlsBackend` | 否 | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
 | `loadBalancingMode` | 否 | `priority` | `priority`（按优先级）或 `balanced`（轮询） |
-| `maxRpmPerCredential` | 否 | `0` | 单个账号每分钟最大请求数；`0` 表示不限。设置页保存后立即热生效并写入 `config.json` |
+| `maxRpmPerCredential` | 否 | `10` | 单个账号每分钟实际转发尝试上限，包括失败与重试；`0` 显式关闭 RPM 保护。设置页保存后立即热生效 |
+| `maxConcurrentRequests` | 否 | `20` | 全局上游并发上限，覆盖完整响应体和 SSE；修改后重启 |
+| `maxConcurrentPerCredential` | 否 | `2` | 单账号上游并发上限，覆盖完整响应体和 SSE；修改后重启 |
+| `upstreamAdmissionTimeoutSecs` | 否 | `30` | 最长准入等待时间，超时返回 429 与 Retry-After |
+| `accountRecoveryCooldownSecs` | 否 | `300` | 自动禁用后的首次只读验活等待秒数 |
+| `accountRecoveryMaxCooldownSecs` | 否 | `3600` | 验活失败后指数退避的最大等待秒数 |
+| `accountRecoveryProbeTimeoutSecs` | 否 | `30` | 单次账号验活总超时秒数 |
 | `forwardSuggestionMode` | 否 | `false` | Suggestion Mode 输入建议请求放行开关。`false`（默认）时服务端拦截 Claude Code 每轮对话后自动发起的全量上下文预测请求并返回空响应，不产生 Token 消耗；`true` 时正常转发上游，以展示输入建议，但每轮会额外产生一次全量上下文计费请求。可用环境变量 `FORWARD_SUGGESTION_MODE` 覆盖 |
 | `clientTokenPassthrough` | 否 | `false` | 客户端 token 直通：`true` 时返回给客户端的 `usage` 字段 1:1 上报真实值；`false`（默认）时按 `0.6657` 系数缩放展示。适用于按返回用量统计上下文占用的第三方客户端；无论开关状态如何，Claude Code 的 auto-compact 触发时机保持不变。可用环境变量 `CLIENT_TOKEN_PASSTHROUGH` 覆盖 |
 | `writeChunkingMaxLines` | 否 | `300` | 分块写入约束的行数上限（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
@@ -522,7 +528,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
   "proxyUrl": "http://127.0.0.1:7890",
   "tlsBackend": "rustls",
   "loadBalancingMode": "priority",
-  "maxRpmPerCredential": 0,
+  "maxRpmPerCredential": 10,
   "forwardSuggestionMode": false,
   "clientTokenPassthrough": false,
   "thinkingAsText": false
@@ -530,6 +536,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 ```
 
 ### 设置页的运行时配置
+
+账号保护的默认值、固定设备标识、完整流并发，以及冷却后验活恢复的行为详见[账号保护机制](docs/account-protection.md)。验活不发送模型推理请求；手动禁用和永久失效账号不自动恢复。
 
 配置 `adminPsw` 后，可在 Admin 设置页直接管理以下选项；每次保存都会写回 `config.json`。
 

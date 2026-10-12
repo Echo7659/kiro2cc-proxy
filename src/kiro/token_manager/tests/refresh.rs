@@ -335,7 +335,7 @@ pub(crate) mod tests {
                 crate::model::config::Config::default(),
                 vec![KiroCredentials {
                     refresh_token: Some("current-refresh-token".to_string()),
-                    machine_id: Some("old-machine-id".to_string()),
+                    machine_id: Some("a".repeat(64)),
                     ..Default::default()
                 }],
                 None,
@@ -351,7 +351,7 @@ pub(crate) mod tests {
                 .update_credential(
                     1,
                     crate::admin::types::UpdateCredentialRequest {
-                        machine_id: Some("new-machine-id".to_string()),
+                        machine_id: Some("b".repeat(64)),
                         ..Default::default()
                     },
                 )
@@ -369,7 +369,7 @@ pub(crate) mod tests {
             .expect("身份更新应成功");
         assert_eq!(
             manager.entries.lock()[0].credentials.machine_id.as_deref(),
-            Some("new-machine-id")
+            Some("b".repeat(64).as_str())
         );
     }
 

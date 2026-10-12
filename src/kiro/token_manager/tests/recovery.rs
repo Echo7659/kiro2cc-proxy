@@ -107,9 +107,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_quota_disabled_recovers_after_month_rollover() {
-        // 回归：月度额度按自然月重置，跨月后账号必须自动回到可用池，
-        // 而不是停留在 disabled 直到人工去 admin 面板启用。
+    async fn test_quota_disabled_month_rollover_requires_probe() {
+        // 跨月并不证明额度已恢复；必须冷却后通过只读额度探测。
         let config = Config::default();
         let manager = MultiTokenManager::new(
             config,
@@ -125,7 +124,7 @@ pub(crate) mod tests {
         assert_eq!(manager.available_count(), 0);
 
         // 同月内不得恢复
-        assert_eq!(manager.recover_expired_quota_disables(), 0);
+        assert!(manager.acquire_context(None).await.is_err());
         assert_eq!(manager.available_count(), 0);
 
         // 把耗尽时间回拨到上个月，模拟跨月
@@ -136,20 +135,16 @@ pub(crate) mod tests {
             }
         }
 
-        let ctx = manager.acquire_context(None).await.unwrap();
-        assert!(ctx.token == "t1" || ctx.token == "t2");
-        assert_eq!(manager.available_count(), 2);
-
-        let entries = manager.entries.lock();
-        for e in entries.iter() {
-            assert_eq!(e.disabled_reason, None, "恢复后禁用原因应清空");
-            assert_eq!(e.quota_exhausted_at, None, "恢复后耗尽时间戳应清空");
-            assert_eq!(e.failure_count, 0, "恢复后失败计数应清零");
+        assert!(manager.acquire_context(None).await.is_err());
+        assert_eq!(manager.available_count(), 0);
+        for entry in manager.entries.lock().iter() {
+            assert_eq!(entry.disabled_reason, Some(DisabledReason::QuotaExceeded));
+            assert!(entry.recovery_next_probe_at.is_some());
         }
     }
 
     #[test]
-    fn test_quota_disabled_missing_timestamp_is_recoverable() {
+    fn test_quota_disabled_missing_timestamp_starts_cooldown() {
         // 旧版本持久化数据没有 quota_exhausted_at，不得因此被永久钉死
         let config = Config::default();
         let manager =
@@ -161,8 +156,10 @@ pub(crate) mod tests {
             entries[0].quota_exhausted_at = None;
         }
 
-        assert_eq!(manager.recover_expired_quota_disables(), 1);
-        assert_eq!(manager.available_count(), 1);
+        manager.entries.lock()[0].recovery_next_probe_at = None;
+        manager.initialize_recovery_cooldowns();
+        assert_eq!(manager.available_count(), 0);
+        assert!(manager.entries.lock()[0].recovery_next_probe_at.unwrap() > Utc::now());
     }
 
     #[tokio::test]

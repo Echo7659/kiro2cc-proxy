@@ -47,6 +47,9 @@ export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
+    refetchInterval: (query) => query.state.data?.credentials.some((credential) =>
+      credential.disabled && (credential.nextRecoveryProbeAt || credential.recoveryProbeInFlight)
+    ) ? 5000 : false,
   })
 }
 

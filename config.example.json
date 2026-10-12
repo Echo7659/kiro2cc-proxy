@@ -4,5 +4,12 @@
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminPsw": "sk-admin-your-secret-key",
-  "clientTokenPassthrough": false
+  "clientTokenPassthrough": false,
+  "maxRpmPerCredential": 10,
+  "maxConcurrentRequests": 20,
+  "maxConcurrentPerCredential": 2,
+  "upstreamAdmissionTimeoutSecs": 30,
+  "accountRecoveryCooldownSecs": 300,
+  "accountRecoveryMaxCooldownSecs": 3600,
+  "accountRecoveryProbeTimeoutSecs": 30
 }

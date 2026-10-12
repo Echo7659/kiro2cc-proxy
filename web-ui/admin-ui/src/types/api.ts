@@ -36,8 +36,8 @@ export interface CredentialStatusItem {
   throttleCount: number
   /**
    * 禁用原因；与 `disabled` 配套使用。
-   * - quota_exceeded：上游 402 MONTHLY_REQUEST_COUNT 触发，跨自然月自动恢复
-   * - 其他：手动 / 连续失败 / refreshToken 撤销 等需人工介入
+   * - quota_exceeded / 连续失败：冷却后只读验活，通过才自动恢复
+   * - 手动禁用、refreshToken 撤销、配置缺失不自动恢复
    */
   disabledReason?:
     | 'manual'
@@ -45,6 +45,10 @@ export interface CredentialStatusItem {
     | 'quota_exceeded'
     | 'invalid_refresh_token'
     | 'too_many_refresh_failures'
+    | 'profile_arn_missing'
+  nextRecoveryProbeAt?: string
+  recoveryProbeInFlight?: boolean
+  recoveryFailures?: number
 }
 
 // 余额响应

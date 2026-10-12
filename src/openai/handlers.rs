@@ -213,7 +213,14 @@ async fn forward_and_wrap(
 
     if !status.is_success() {
         let bytes = read_body(upstream_body).await;
-        return (status, Json(error::convert_error_body(status, &bytes))).into_response();
+        let mut response =
+            (status, Json(error::convert_error_body(status, &bytes))).into_response();
+        if let Some(retry_after) = parts.headers.get(header::RETRY_AFTER) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after.clone());
+        }
+        return response;
     }
 
     if stream {
@@ -359,4 +366,70 @@ fn stream_openai_response(body: Body, converter: Box<dyn StreamConverter + Send>
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(out))
         .expect("构造 SSE 响应不会失败")
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+    use crate::kiro::model::credentials::KiroCredentials;
+    use crate::kiro::provider::KiroProvider;
+    use crate::kiro::token_manager::MultiTokenManager;
+    use crate::model::config::Config;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn both_openai_protocols_preserve_rate_limit_status_and_retry_after() {
+        for responses in [false, true] {
+            let config: Config = serde_json::from_value(json!({"maxRpmPerCredential":1})).unwrap();
+            let manager = MultiTokenManager::new(
+                config,
+                vec![KiroCredentials {
+                    id: Some(1),
+                    access_token: Some("synthetic-access".to_string()),
+                    refresh_token: Some("synthetic-refresh".repeat(10)),
+                    expires_at: Some(
+                        (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    ),
+                    auth_method: Some("social".to_string()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+            let mut provider = KiroProvider::new(Arc::new(manager));
+            // 即使门禁回归，也只会访问本机未使用端口，绝不调用真实提供商。
+            provider.upstream_url_override = Some("http://127.0.0.1:9/".to_string());
+            provider
+                .rpm_tracker
+                .as_ref()
+                .unwrap()
+                .try_admit_credential(1, 1)
+                .unwrap();
+            let state = AppState::new().with_kiro_provider(provider);
+            let request = if responses {
+                json!({"model":"claude-sonnet-4-5","input":"Hello"})
+            } else {
+                json!({"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Hello"}]})
+            };
+            let body = Bytes::from(serde_json::to_vec(&request).unwrap());
+            let address = ConnectInfo("127.0.0.1:10000".parse().unwrap());
+            let response = if responses {
+                post_responses(State(state), None, address, HeaderMap::new(), body).await
+            } else {
+                post_chat_completions(State(state), None, address, HeaderMap::new(), body).await
+            };
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let wait: u64 = response.headers()[header::RETRY_AFTER]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=60).contains(&wait));
+            let bytes = read_body(response.into_body()).await;
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"]["type"], "rate_limit_error");
+        }
+    }
 }

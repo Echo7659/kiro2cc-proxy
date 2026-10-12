@@ -154,7 +154,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_multi_token_manager_acquire_context_auto_recovers_all_disabled() {
+    async fn test_multi_token_manager_all_disabled_stays_in_cooldown() {
         let config = Config::default();
         let mut cred1 = KiroCredentials::default();
         cred1.access_token = Some("t1".to_string());
@@ -176,14 +176,20 @@ pub(crate) mod tests {
 
         assert_eq!(manager.available_count(), 0);
 
-        // 应触发自愈：重置失败计数并重新启用，避免必须重启进程
-        let ctx = manager.acquire_context(None).await.unwrap();
-        assert!(ctx.token == "t1" || ctx.token == "t2");
-        assert_eq!(manager.available_count(), 2);
+        // 不能为了可用性绕过认证异常：取号不得盲目重新启用。
+        assert!(manager.acquire_context(None).await.is_err());
+        assert_eq!(manager.available_count(), 0);
+        assert!(
+            manager
+                .entries
+                .lock()
+                .iter()
+                .all(|e| e.recovery_next_probe_at.is_some())
+        );
     }
 
     #[tokio::test]
-    async fn test_acquire_context_self_heal_excludes_invalid_refresh_token() {
+    async fn test_acquire_context_keeps_refresh_failures_and_invalid_token_disabled() {
         // TooManyRefreshFailures 属于瞬态故障，应参与全灭自愈；InvalidRefreshToken 是
         // 服务端确认的永久性失效，重置重试只会立即再次失败，因此不参与自愈（覆盖 T12）
         let config = Config::default();
@@ -198,16 +204,19 @@ pub(crate) mod tests {
         manager.report_refresh_token_invalid(2);
         assert_eq!(manager.available_count(), 0);
 
-        // 触发自愈：#1（TooManyRefreshFailures）应被重置，#2（InvalidRefreshToken）应保持禁用
-        let ctx = manager.acquire_context(None).await.unwrap();
-        assert_eq!(ctx.id, 1);
-        assert_eq!(manager.available_count(), 1);
+        // 瞬态刷新失败也要经过冷却和探测；永久失效不得进入探测队列。
+        assert!(manager.acquire_context(None).await.is_err());
+        assert_eq!(manager.available_count(), 0);
 
         let entries = manager.entries.lock();
         let entry1 = entries.iter().find(|e| e.id == 1).unwrap();
-        assert!(!entry1.disabled);
-        assert_eq!(entry1.disabled_reason, None);
-        assert_eq!(entry1.refresh_failure_count, 0);
+        assert!(entry1.disabled);
+        assert_eq!(
+            entry1.disabled_reason,
+            Some(DisabledReason::TooManyRefreshFailures)
+        );
+        assert_eq!(entry1.refresh_failure_count, MAX_FAILURES_PER_CREDENTIAL);
+        assert!(entry1.recovery_next_probe_at.is_some());
 
         let entry2 = entries.iter().find(|e| e.id == 2).unwrap();
         assert!(

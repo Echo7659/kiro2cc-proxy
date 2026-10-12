@@ -14,15 +14,15 @@ use crate::model::config::Config;
 
 /// 兜底 machineId 缓存（按凭据 id 分桶，进程生命周期内稳定）
 ///
-/// key 为 `credentials.id`；无 id 的凭据共享同一个兜底值（正常流程不会出现）。
-static FALLBACK_MACHINE_IDS: OnceLock<Mutex<HashMap<Option<u64>, String>>> = OnceLock::new();
+/// 未分配 id 的新账号不共享缓存；调用方应在首次使用前固定并持久化该值。
+static FALLBACK_MACHINE_IDS: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
 
 /// 标准化 machineId 格式
 ///
 /// 支持以下格式：
 /// - 64 字符十六进制字符串（直接返回）
 /// - UUID 格式（如 "2582956e-cc88-4669-b546-07adbffcb894"，移除连字符后补齐到 64 字符）
-fn normalize_machine_id(machine_id: &str) -> Option<String> {
+pub(crate) fn normalize_machine_id(machine_id: &str) -> Option<String> {
     let trimmed = machine_id.trim();
 
     // 如果已经是 64 字符，直接返回
@@ -30,11 +30,9 @@ fn normalize_machine_id(machine_id: &str) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    // 尝试解析 UUID 格式（移除连字符）
-    let without_dashes: String = trimmed.chars().filter(|c| *c != '-').collect();
-
-    // UUID 去掉连字符后是 32 字符
-    if without_dashes.len() == 32 && without_dashes.chars().all(|c| c.is_ascii_hexdigit()) {
+    // 同时兼容带连字符和紧凑 UUID，拒绝连字符位置损坏的输入。
+    if matches!(trimmed.len(), 32 | 36) && Uuid::parse_str(trimmed).is_ok() {
+        let without_dashes: String = trimmed.chars().filter(|c| *c != '-').collect();
         // 补齐到 64 字符（重复一次）
         return Some(format!("{}{}", without_dashes, without_dashes));
     }
@@ -43,19 +41,23 @@ fn normalize_machine_id(machine_id: &str) -> Option<String> {
     None
 }
 
-/// 根据凭证信息生成唯一的 Machine ID
+/// 固定账号自己的 machineId，并返回是否需要持久化。
 ///
-/// 优先使用账号级 machineId，其次使用 config.machineId，然后使用 refreshToken 生成
-pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config) -> String {
+/// 保留合法账号标识；缺失或损坏时只按该账号的派生材料补全，避免多个账号继承全局值。
+pub fn ensure_fixed_machine_id(credentials: &mut KiroCredentials, config: &Config) -> bool {
+    let fixed_id = generate_from_credentials(credentials, config);
+    if credentials.machine_id.as_deref() == Some(fixed_id.as_str()) {
+        return false;
+    }
+    credentials.machine_id = Some(fixed_id);
+    true
+}
+
+/// 优先使用合法账号标识，否则按该账号 refreshToken 派生。
+/// 全局 machineId 不再作为多账号共享身份的默认值。
+pub fn generate_from_credentials(credentials: &KiroCredentials, _config: &Config) -> String {
     // 如果配置了账号级 machineId，优先使用
     if let Some(ref machine_id) = credentials.machine_id
-        && let Some(normalized) = normalize_machine_id(machine_id)
-    {
-        return normalized;
-    }
-
-    // 如果配置了全局 machineId，作为默认值
-    if let Some(ref machine_id) = config.machine_id
         && let Some(normalized) = normalize_machine_id(machine_id)
     {
         return normalized;
@@ -75,25 +77,29 @@ pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config)
 /// 为缺失派生材料的凭据生成兜底 machineId
 ///
 /// - 经 `sha256("KiroFallback/<uuid>")` 派生，输出格式与正常路径一致（64 字符十六进制）
-/// - 按 `credentials.id` 在进程内缓存；同一凭据多次调用返回同一值
-/// - 数组格式凭据会被 `MultiTokenManager::new` 写回 `cred.machine_id` 并持久化到磁盘，
-///   重启后视为已配置值直接复用，不再重新随机；仅单账号对象格式（不落盘）才会在每次
-///   进程启动时重新随机
+/// - 已分配 id 时在进程内缓存；尚无 id 的新账号每次产生独立值
+/// - 启动、导入和刷新前通过 ensure_fixed_machine_id 固定到账号字段并持久化
 fn fallback_machine_id(credentials: &KiroCredentials) -> String {
+    let Some(id) = credentials.id else {
+        return random_machine_id();
+    };
     let cache = FALLBACK_MACHINE_IDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = cache.lock();
-    if let Some(existing) = map.get(&credentials.id) {
+    if let Some(existing) = map.get(&id) {
         return existing.clone();
     }
 
-    let seed = Uuid::new_v4();
-    let derived = sha256_hex(&format!("KiroFallback/{}", seed));
+    let derived = random_machine_id();
     tracing::warn!(
         credential_id = ?credentials.id,
         "凭据缺少派生材料（machineId/refreshToken 均不可用），使用随机兜底 machineId（进程内稳定）"
     );
-    map.insert(credentials.id, derived.clone());
+    map.insert(id, derived.clone());
     derived
+}
+
+fn random_machine_id() -> String {
+    sha256_hex(&format!("KiroFallback/{}", Uuid::new_v4()))
 }
 
 /// SHA256 哈希实现（返回十六进制字符串）
@@ -119,13 +125,14 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_with_custom_machine_id() {
-        let credentials = KiroCredentials::default();
+    fn test_generate_ignores_shared_global_machine_id() {
+        let mut credentials = KiroCredentials::default();
+        credentials.refresh_token = Some("account-refresh-token".to_string());
         let mut config = Config::default();
         config.machine_id = Some("a".repeat(64));
 
         let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result, "a".repeat(64));
+        assert_eq!(result, sha256_hex("KotlinNativeAPI/account-refresh-token"));
     }
 
     #[test]
@@ -213,6 +220,7 @@ mod tests {
         assert!(normalize_machine_id("invalid").is_none());
         assert!(normalize_machine_id("too-short").is_none());
         assert!(normalize_machine_id(&"g".repeat(64)).is_none()); // 非十六进制
+        assert!(normalize_machine_id(&format!("----{}", "a".repeat(32))).is_none());
     }
 
     #[test]
@@ -224,5 +232,75 @@ mod tests {
 
         let result = generate_from_credentials(&credentials, &config);
         assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn fixed_identity_survives_token_rotation_and_reload() {
+        let config = Config::default();
+        let mut credentials = KiroCredentials {
+            refresh_token: Some("original-refresh-token".to_string()),
+            ..Default::default()
+        };
+        assert!(ensure_fixed_machine_id(&mut credentials, &config));
+        let original_id = credentials.machine_id.clone();
+        credentials.refresh_token = Some("rotated-refresh-token".to_string());
+        assert!(!ensure_fixed_machine_id(&mut credentials, &config));
+
+        let serialized = serde_json::to_string(&credentials).unwrap();
+        let mut restored: KiroCredentials = serde_json::from_str(&serialized).unwrap();
+        assert!(!ensure_fixed_machine_id(&mut restored, &config));
+        assert_eq!(restored.machine_id, original_id);
+    }
+
+    #[test]
+    fn fixed_identity_repairs_invalid_account_value_without_global_sharing() {
+        let mut config = Config::default();
+        config.machine_id = Some("a".repeat(64));
+        let mut first = KiroCredentials {
+            machine_id: Some("invalid-machine-id".to_string()),
+            refresh_token: Some("first-account-token".to_string()),
+            ..Default::default()
+        };
+        let mut second = KiroCredentials {
+            refresh_token: Some("second-account-token".to_string()),
+            ..Default::default()
+        };
+        assert!(ensure_fixed_machine_id(&mut first, &config));
+        assert!(ensure_fixed_machine_id(&mut second, &config));
+        assert_eq!(
+            first.machine_id,
+            Some(sha256_hex("KotlinNativeAPI/first-account-token"))
+        );
+        assert_ne!(first.machine_id, second.machine_id);
+        assert_ne!(first.machine_id, config.machine_id);
+    }
+
+    #[test]
+    fn fixed_identity_preserves_valid_explicit_value_and_normalizes_uuid_once() {
+        let config = Config::default();
+        let explicit = "B".repeat(64);
+        let mut credentials = KiroCredentials {
+            machine_id: Some(explicit.clone()),
+            ..Default::default()
+        };
+        assert!(!ensure_fixed_machine_id(&mut credentials, &config));
+        assert_eq!(credentials.machine_id, Some(explicit));
+
+        let uuid = "2582956e-cc88-4669-b546-07adbffcb894";
+        credentials.machine_id = Some(format!(" {uuid} "));
+        assert!(ensure_fixed_machine_id(&mut credentials, &config));
+        assert_eq!(credentials.machine_id, normalize_machine_id(uuid));
+        assert!(!ensure_fixed_machine_id(&mut credentials, &config));
+    }
+
+    #[test]
+    fn fixed_identity_without_secret_is_unique_before_account_ids_are_assigned() {
+        let config = Config::default();
+        let mut first = KiroCredentials::default();
+        let mut second = KiroCredentials::default();
+        assert!(ensure_fixed_machine_id(&mut first, &config));
+        assert!(ensure_fixed_machine_id(&mut second, &config));
+        assert_ne!(first.machine_id, second.machine_id);
+        assert!(!ensure_fixed_machine_id(&mut first, &config));
     }
 }

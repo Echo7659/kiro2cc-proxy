@@ -66,9 +66,7 @@ impl MultiTokenManager {
                     has_new_ids = true;
                     id
                 });
-                if cred.machine_id.is_none() {
-                    cred.machine_id =
-                        Some(machine_id::generate_from_credentials(&cred, config_ref));
+                if machine_id::ensure_fixed_machine_id(&mut cred, config_ref) {
                     has_new_machine_ids = true;
                 }
                 // 存量账号补全：旧版本添加的 social/idc 账号可能没有 profileArn，
@@ -98,6 +96,10 @@ impl MultiTokenManager {
                     last_refreshed_at: None,
                     rotation_bias: 0,
                     quota_exhausted_at: None,
+                    recovery_next_probe_at: None,
+                    recovery_failures: 0,
+                    recovery_generation: 0,
+                    recovery_probe_in_flight: false,
                 }
             })
             .collect();
@@ -173,8 +175,8 @@ impl MultiTokenManager {
         // 加载持久化的统计数据（success_count, last_used_at, disabled_reason）
         manager.load_stats();
 
-        // 启动即检查：跨自然月后自动恢复因额度用尽被禁用的账号
-        manager.recover_expired_quota_disables();
+        // 旧自动禁用数据没有时间戳时也必须先冷却；构造阶段不发起网络探测。
+        manager.initialize_recovery_cooldowns();
 
         Ok(manager)
     }
@@ -223,6 +225,46 @@ impl MultiTokenManager {
     /// 获取可用账号数量
     pub fn available_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
+    }
+
+    /// 排队请求发送前重新确认账号未被删除或禁用。
+    pub(crate) fn credential_is_available(&self, id: u64) -> bool {
+        self.entries
+            .lock()
+            .iter()
+            .any(|entry| entry.id == id && !entry.disabled)
+    }
+
+    /// 排队期间的 Token 轮换、禁用和身份编辑必须让旧请求上下文失效。
+    pub(crate) fn context_is_current(&self, context: &CallContext) -> bool {
+        self.entries
+            .lock()
+            .iter()
+            .any(|entry| Self::context_matches_entry(entry, context))
+    }
+
+    /// 供状态上报在 entries 锁内校验，避免检查与变更之间的管理员竞态。
+    pub(super) fn context_matches_entry(entry: &CredentialEntry, context: &CallContext) -> bool {
+        let current = &entry.credentials;
+        let captured = &context.credentials;
+        entry.id == context.id
+            && !entry.disabled
+            && !is_token_expired(current)
+            && current.access_token.as_deref() == Some(context.token.as_str())
+            && Self::same_outbound_identity(current, captured)
+    }
+
+    pub(super) fn same_outbound_identity(
+        current: &KiroCredentials,
+        captured: &KiroCredentials,
+    ) -> bool {
+        Self::has_same_subscription_identity(current, captured)
+            && current.provider == captured.provider
+            && current.proxy_url == captured.proxy_url
+            && current.proxy_username == captured.proxy_username
+            && current.proxy_password == captured.proxy_password
+            && current.endpoint == captured.endpoint
+            && current.thinking_adaptive == captured.thinking_adaptive
     }
 
     /// 返回当前未禁用账号的 id 列表
@@ -349,9 +391,6 @@ impl MultiTokenManager {
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的账号（如 opus 模型需要付费订阅）
     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
-        // 跨自然月后，额度已重置，先把此前判定耗尽的账号放回可用池
-        self.recover_expired_quota_disables();
-
         let total = self.total_count();
         let mut tried_count = 0;
         let is_opus = model
@@ -392,43 +431,7 @@ impl MultiTokenManager {
                     hit
                 } else {
                     // 当前账号不可用或 balanced 模式，根据负载均衡策略选择
-                    let mut best = self.select_next_credential(model, &[]);
-
-                    // 没有可用账号：如果是"自动禁用导致全灭"，做一次类似重启的自愈
-                    if best.is_none() {
-                        let mut entries = self.entries.lock();
-                        if entries.iter().any(|e| {
-                            e.disabled
-                                && matches!(
-                                    e.disabled_reason,
-                                    Some(DisabledReason::TooManyFailures)
-                                        | Some(DisabledReason::TooManyRefreshFailures)
-                                )
-                        }) {
-                            tracing::warn!(
-                                "所有账号均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
-                            );
-                            for e in entries.iter_mut() {
-                                match e.disabled_reason {
-                                    Some(DisabledReason::TooManyFailures) => {
-                                        e.disabled = false;
-                                        e.disabled_reason = None;
-                                        e.failure_count = 0;
-                                    }
-                                    Some(DisabledReason::TooManyRefreshFailures) => {
-                                        e.disabled = false;
-                                        e.disabled_reason = None;
-                                        e.refresh_failure_count = 0;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            drop(entries);
-                            // 落盘清除的禁用原因，否则重启后 load_stats 会让禁用态复活
-                            self.save_stats();
-                            best = self.select_next_credential(model, &[]);
-                        }
-                    }
+                    let best = self.select_next_credential(model, &[]);
 
                     if let Some((new_id, new_creds)) = best {
                         // 更新 current_id
@@ -452,9 +455,9 @@ impl MultiTokenManager {
                     tracing::warn!("账号 #{} Token 刷新失败，尝试下一个账号: {}", id, e);
 
                     if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
+                        self.report_invalid_refresh_for_credentials(id, &credentials);
                     } else {
-                        self.report_refresh_failure(id);
+                        self.report_refresh_failure_for_credentials(id, &credentials);
                     }
 
                     // 切换到下一个优先级的账号
@@ -477,9 +480,6 @@ impl MultiTokenManager {
         if allowed_ids.is_empty() {
             return self.acquire_context(model).await;
         }
-
-        // 跨自然月后，额度已重置，先把此前判定耗尽的账号放回可用池
-        self.recover_expired_quota_disables();
 
         let mut tried_ids: Vec<u64> = Vec::new();
 
@@ -510,9 +510,9 @@ impl MultiTokenManager {
                     tracing::warn!("绑定账号 #{} Token 刷新失败，尝试下一个: {}", id, e);
 
                     if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
+                        self.report_invalid_refresh_for_credentials(id, &credentials);
                     } else {
-                        self.report_refresh_failure(id);
+                        self.report_refresh_failure_for_credentials(id, &credentials);
                     }
 
                     tried_ids.push(id);
@@ -627,8 +627,6 @@ impl MultiTokenManager {
                         .entry(cid.to_string())
                         .and_modify(|e| {
                             e.inserted_at = Instant::now();
-                            // 成功命中说明该账号仍可承载此会话，清零连续限流计数
-                            e.consecutive_throttles = 0;
                         });
                     return Ok(ctx);
                 }
@@ -640,9 +638,9 @@ impl MultiTokenManager {
                     );
 
                     if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                        self.report_refresh_token_invalid(id);
+                        self.report_invalid_refresh_for_credentials(id, &credentials);
                     } else {
-                        self.report_refresh_failure(id);
+                        self.report_refresh_failure_for_credentials(id, &credentials);
                     }
 
                     self.sticky_cache.lock().remove(cid);

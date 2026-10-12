@@ -482,7 +482,13 @@ Lower `priority` value = higher priority. Up to 3 retries per account, 9 per req
 | `proxyPassword` | No | — | Proxy password |
 | `tlsBackend` | No | `rustls` | TLS backend: `rustls` or `native-tls` |
 | `loadBalancingMode` | No | `priority` | `priority` (by priority) or `balanced` (round-robin) |
-| `maxRpmPerCredential` | No | `0` | Maximum requests per minute for each account; `0` means unlimited. Saving from the settings page applies it immediately and persists it to `config.json` |
+| `maxRpmPerCredential` | No | `10` | Actual upstream attempts per account per minute, including failed attempts and retries; `0` explicitly disables RPM protection. Hot-applied from settings |
+| `maxConcurrentRequests` | No | `20` | Global upstream concurrency, held for the complete response body/SSE; restart after changes |
+| `maxConcurrentPerCredential` | No | `2` | Per-account upstream concurrency, held for the complete response body/SSE; restart after changes |
+| `upstreamAdmissionTimeoutSecs` | No | `30` | Maximum admission wait; exhaustion returns 429 with Retry-After |
+| `accountRecoveryCooldownSecs` | No | `300` | Initial cooldown before probing an automatically disabled account |
+| `accountRecoveryMaxCooldownSecs` | No | `3600` | Maximum exponential backoff after failed recovery probes |
+| `accountRecoveryProbeTimeoutSecs` | No | `30` | Total timeout for one read-only account probe |
 | `forwardSuggestionMode` | No | `false` | Suggestion Mode input-prediction switch. With the default `false`, the proxy intercepts Claude Code's automatic full-context prediction request after each turn and returns an empty response without Token usage. `true` forwards it upstream to show input suggestions, but each turn incurs one additional full-context billed request. Override with `FORWARD_SUGGESTION_MODE` |
 | `clientTokenPassthrough` | No | `false` | Client token passthrough: `true` reports returned `usage` fields 1:1 with real values; the default `false` displays values scaled by `0.6657`. It supports third-party clients that calculate context usage from returned usage values. Claude Code's auto-compact trigger timing remains unchanged in either mode. Override with `CLIENT_TOKEN_PASSTHROUGH` |
 | `writeChunkingMaxLines` | No | `300` | Line limit of the chunked-writing instruction (see the `Reset(StreamId(1), INTERNAL_ERROR, Remote)` FAQ entry): when a request carries Write / Edit / MultiEdit, the system prompt asks for no more than ~N lines per tool call. Larger saves credits but makes the ~240s upstream stream reset more likely; `0` disables the instruction. Editable in the Admin settings page and hot-applied to subsequent requests. Override with `WRITE_CHUNKING_MAX_LINES` |
@@ -501,7 +507,7 @@ Full example:
   "proxyUrl": "http://127.0.0.1:7890",
   "tlsBackend": "rustls",
   "loadBalancingMode": "priority",
-  "maxRpmPerCredential": 0,
+  "maxRpmPerCredential": 10,
   "forwardSuggestionMode": false,
   "clientTokenPassthrough": false,
   "thinkingAsText": false
@@ -509,6 +515,8 @@ Full example:
 ```
 
 ### Runtime Settings in the Admin Panel
+
+See [Account protection](docs/account-protection.md) for pinned per-account identities, full-body concurrency leases, and cooldown followed by a read-only recovery check. Recovery never sends an inference request; manually disabled and permanently invalid accounts are excluded.
 
 After configuring `adminPsw`, the Admin settings page manages the following options. Each save persists the value to `config.json`.
 

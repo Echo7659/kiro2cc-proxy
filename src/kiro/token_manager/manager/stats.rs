@@ -29,6 +29,9 @@ impl MultiTokenManager {
             None => return Ok(false),
         };
 
+        // 快照与写入必须在同一临界区，避免旧快照覆盖新的手动禁用/身份编辑。
+        let _guard = self.persist_lock.lock();
+
         // 收集所有账号
         let credentials: Vec<KiroCredentials> = {
             let entries = self.entries.lock();
@@ -59,10 +62,7 @@ impl MultiTokenManager {
         let write_result = {
             let path = path.clone();
             let json = json.clone();
-            let do_write = move || -> std::io::Result<()> {
-                let _guard = self.persist_lock.lock();
-                atomic_write(&path, json.as_bytes())
-            };
+            let do_write = move || -> std::io::Result<()> { atomic_write(&path, json.as_bytes()) };
             if tokio::runtime::Handle::try_current().is_ok() {
                 tokio::task::block_in_place(do_write)
             } else {
@@ -192,6 +192,8 @@ impl MultiTokenManager {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
                 entry.last_used_at = s.last_used_at.clone();
+                entry.failure_count = s.failure_count;
+                entry.refresh_failure_count = s.refresh_failure_count;
                 entry.throttle_count = s.throttle_count;
                 if let Some(ref ts) = s.last_throttled_wall {
                     entry.last_throttled_wall = ts.parse::<DateTime<Utc>>().ok();
@@ -209,6 +211,11 @@ impl MultiTokenManager {
                         .quota_exhausted_at
                         .as_ref()
                         .and_then(|ts| ts.parse::<DateTime<Utc>>().ok());
+                    entry.recovery_next_probe_at = s
+                        .recovery_next_probe_at
+                        .as_ref()
+                        .and_then(|ts| ts.parse::<DateTime<Utc>>().ok());
+                    entry.recovery_failures = s.recovery_failures;
                 }
             }
         }
@@ -224,6 +231,9 @@ impl MultiTokenManager {
             None => return,
         };
 
+        // 串行化快照与写盘，旧恢复结果不能在新的管理员状态之后覆盖缓存。
+        let _guard = self.persist_lock.lock();
+
         let stats: HashMap<String, StatsEntry> = {
             let entries = self.entries.lock();
             entries
@@ -233,6 +243,8 @@ impl MultiTokenManager {
                         e.id.to_string(),
                         StatsEntry {
                             success_count: e.success_count,
+                            failure_count: e.failure_count,
+                            refresh_failure_count: e.refresh_failure_count,
                             last_used_at: e.last_used_at.clone(),
                             throttle_count: e.throttle_count,
                             last_throttled_wall: e.last_throttled_wall.map(|t| t.to_rfc3339()),
@@ -249,6 +261,10 @@ impl MultiTokenManager {
                                 )
                             }),
                             quota_exhausted_at: e.quota_exhausted_at.map(|t| t.to_rfc3339()),
+                            recovery_next_probe_at: e
+                                .recovery_next_probe_at
+                                .map(|t| t.to_rfc3339()),
+                            recovery_failures: e.recovery_failures,
                         },
                     )
                 })
@@ -257,7 +273,6 @@ impl MultiTokenManager {
 
         match serde_json::to_string_pretty(&stats) {
             Ok(json) => {
-                let _guard = self.persist_lock.lock();
                 if let Err(e) = atomic_write(&path, json.as_bytes()) {
                     tracing::warn!("保存统计缓存失败: {}", e);
                 } else {

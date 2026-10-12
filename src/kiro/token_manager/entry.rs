@@ -35,8 +35,25 @@ pub(crate) struct CredentialEntry {
     pub(crate) last_refreshed_at: Option<Instant>,
     /// 轮转偏移量：429 时 +1，成功时清零；选择账号时优先选 bias 最小的
     pub(crate) rotation_bias: u32,
-    /// 被判定额度用尽的时间（UTC，持久化），用于跨自然月后自动恢复
+    /// 被判定额度用尽的时间（UTC，持久化）
     pub(crate) quota_exhausted_at: Option<DateTime<Utc>>,
+    /// 下次允许只读恢复探测的时间；没有到期不得重新调用该账号
+    pub(crate) recovery_next_probe_at: Option<DateTime<Utc>>,
+    /// 连续恢复探测失败次数，控制指数退避
+    pub(crate) recovery_failures: u32,
+    /// 管理操作/新禁用事件的版本，拒绝在途探测恢复已经修改的账号
+    pub(crate) recovery_generation: u64,
+    /// 每账号探测 singleflight；进程重启后清零
+    pub(crate) recovery_probe_in_flight: bool,
+}
+
+impl CredentialEntry {
+    /// 使所有在途恢复结果失效；探测占位由其 RAII guard 自行释放。
+    pub(crate) fn invalidate_recovery(&mut self) {
+        self.recovery_generation = self.recovery_generation.wrapping_add(1);
+        self.recovery_next_probe_at = None;
+        self.recovery_failures = 0;
+    }
 }
 
 /// 禁用原因
@@ -58,6 +75,13 @@ pub enum DisabledReason {
 }
 
 impl DisabledReason {
+    pub(crate) fn allows_recovery_probe(self) -> bool {
+        matches!(
+            self,
+            Self::TooManyFailures | Self::QuotaExceeded | Self::TooManyRefreshFailures
+        )
+    }
+
     /// 面向客户端的原因描述（用于错误消息，便于从日志直接判断真因）
     pub(crate) fn describe(&self) -> &'static str {
         match self {
@@ -126,7 +150,15 @@ pub(crate) struct StatsEntry {
     /// 自动禁用原因（仅持久化自动判定的原因；Manual 由 credentials.json 承载）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) disabled_reason: Option<DisabledReason>,
-    /// 额度用尽时间（UTC RFC3339），用于跨自然月自动恢复
+    /// 额度用尽时间（UTC RFC3339）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quota_exhausted_at: Option<String>,
+    #[serde(default)]
+    pub(crate) failure_count: u32,
+    #[serde(default)]
+    pub(crate) refresh_failure_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_next_probe_at: Option<String>,
+    #[serde(default)]
+    pub(crate) recovery_failures: u32,
 }

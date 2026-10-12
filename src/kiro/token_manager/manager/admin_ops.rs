@@ -11,12 +11,17 @@ use super::super::refresh::{
 use super::super::types::{
     CredentialEntrySnapshot, ManagerSnapshot, MultiTokenManager, TOKEN_REFRESH_COOLDOWN,
 };
+use crate::kiro::machine_id;
 use crate::kiro::model::available_models::AvailableModelsResponse;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::credentials::canonicalize_auth_method_value;
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+#[cfg(test)]
+#[path = "fingerprint_tests.rs"]
+mod fingerprint_tests;
 
 impl MultiTokenManager {
     /// 切换到优先级最高的可用账号
@@ -111,6 +116,9 @@ impl MultiTokenManager {
                     throttle_count: e.throttle_count,
                     disabled_reason: e.disabled_reason,
                     thinking_adaptive: e.credentials.thinking_adaptive,
+                    next_recovery_probe_at: e.recovery_next_probe_at.map(|time| time.to_rfc3339()),
+                    recovery_failures: e.recovery_failures,
+                    recovery_probe_in_flight: e.recovery_probe_in_flight,
                 })
                 .collect(),
             current_id,
@@ -145,7 +153,7 @@ impl MultiTokenManager {
     /// 既不参与 token 刷新，也不参与 API 请求，更不影响上游返回的订阅等级。若纳入比对，则
     /// 「仅改登录来源 / 补充 provider」的更新会让在途刷新/额度查询以「身份已变更」失败，
     /// 进而累计 `refresh_failure_count` 误禁用账号。
-    fn has_same_subscription_identity(
+    pub(crate) fn has_same_subscription_identity(
         current: &KiroCredentials,
         queried: &KiroCredentials,
     ) -> bool {
@@ -180,6 +188,7 @@ impl MultiTokenManager {
             id
         );
 
+        machine_id::ensure_fixed_machine_id(&mut entry.credentials, &self.config);
         entry.credentials.access_token = refreshed_credentials.access_token.clone();
         entry.credentials.sso_access_token = refreshed_credentials.sso_access_token.clone();
         entry.credentials.refresh_token = refreshed_credentials.refresh_token.clone();
@@ -274,6 +283,7 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.disabled = disabled;
             if !disabled {
                 // 启用时重置失败计数
@@ -303,12 +313,14 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.credentials.priority = priority;
         }
         // 立即按新优先级重新选择当前账号（无论持久化是否成功）
         self.select_highest_priority();
         // 持久化更改
         self.persist_credentials()?;
+        self.save_stats();
         Ok(())
     }
 
@@ -323,6 +335,7 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.failure_count = 0;
             entry.refresh_failure_count = 0;
             entry.disabled = false;
@@ -626,10 +639,11 @@ impl MultiTokenManager {
     /// # 返回
     /// - `Ok(u64)` - 新账号 ID
     /// - `Err(_)` - 验证失败或添加失败
-    pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+    pub async fn add_credential(&self, mut new_cred: KiroCredentials) -> anyhow::Result<u64> {
         let _operation_guard = self.credential_admin_lock.lock().await;
 
         // 1. 基本验证
+        machine_id::ensure_fixed_machine_id(&mut new_cred, &self.config);
         validate_refresh_token(&new_cred)?;
         let initially_disabled = new_cred.disabled;
 
@@ -727,6 +741,10 @@ impl MultiTokenManager {
                 last_refreshed_at: None,
                 rotation_bias: 0,
                 quota_exhausted_at: None,
+                recovery_next_probe_at: None,
+                recovery_failures: 0,
+                recovery_generation: 0,
+                recovery_probe_in_flight: false,
             });
         }
 
@@ -757,7 +775,7 @@ impl MultiTokenManager {
     pub async fn update_credential(
         &self,
         id: u64,
-        update: crate::admin::types::UpdateCredentialRequest,
+        mut update: crate::admin::types::UpdateCredentialRequest,
     ) -> anyhow::Result<()> {
         let _operation_guard = self.credential_admin_lock.lock().await;
         let _identity_guard = if Self::update_changes_subscription_identity(&update) {
@@ -775,6 +793,12 @@ impl MultiTokenManager {
             anyhow::bail!("账号不存在: {}", id);
         }
 
+        if let Some(value) = &update.machine_id {
+            update.machine_id = Some(machine_id::normalize_machine_id(value).ok_or_else(|| {
+                anyhow::anyhow!("machineId 格式无效，请提供 64 位十六进制字符串或 UUID")
+            })?);
+        }
+
         // 如果 refreshToken 变更，需要重新验证
         let needs_revalidation = update.refresh_token.is_some();
 
@@ -784,6 +808,8 @@ impl MultiTokenManager {
                 let entries = self.entries.lock();
                 let entry = entries.iter().find(|e| e.id == id).unwrap();
                 let mut cred = entry.credentials.clone();
+                // 在更换刷新材料之前固定原账号身份，避免设备标识跟随 Token 变化。
+                machine_id::ensure_fixed_machine_id(&mut cred, &self.config);
                 if let Some(ref rt) = update.refresh_token {
                     cred.refresh_token = Some(rt.clone());
                 }
@@ -810,6 +836,9 @@ impl MultiTokenManager {
                         Some(ar.clone())
                     };
                 }
+                if let Some(ref machine_id) = update.machine_id {
+                    cred.machine_id = Some(machine_id.clone());
+                }
                 cred
             };
 
@@ -820,7 +849,9 @@ impl MultiTokenManager {
             // 更新账号（保留验证后的 access_token 和 expires_at）
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.invalidate_recovery();
                 entry.credentials.access_token = validated.access_token;
+                entry.credentials.machine_id = validated.machine_id;
                 entry.credentials.expires_at = validated.expires_at;
                 if let Some(profile_arn) = validated.profile_arn {
                     entry.credentials.profile_arn = Some(profile_arn);
@@ -837,11 +868,14 @@ impl MultiTokenManager {
             // 不涉及 refreshToken 变更，直接更新配置字段
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.invalidate_recovery();
+                machine_id::ensure_fixed_machine_id(&mut entry.credentials, &self.config);
                 Self::apply_update_fields(&mut entry.credentials, &update);
             }
         }
 
         self.persist_credentials()?;
+        self.save_stats();
         tracing::info!("成功更新账号 #{}", id);
         Ok(())
     }
@@ -892,11 +926,7 @@ impl MultiTokenManager {
             };
         }
         if let Some(ref mi) = update.machine_id {
-            cred.machine_id = if mi.is_empty() {
-                None
-            } else {
-                Some(mi.clone())
-            };
+            cred.machine_id = Some(mi.clone());
         }
         if let Some(ref em) = update.email {
             cred.email = if em.is_empty() {

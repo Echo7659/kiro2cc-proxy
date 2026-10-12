@@ -68,6 +68,10 @@ pub struct CredentialEntrySnapshot {
     /// too_many_refresh_failures）；None = 未禁用。Admin 面板据此区分「已禁用」与「额度已用尽」
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<DisabledReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_recovery_probe_at: Option<String>,
+    pub recovery_failures: u32,
+    pub recovery_probe_in_flight: bool,
     /// 账号级 thinking adaptive 注入开关
     pub thinking_adaptive: bool,
 }
@@ -136,7 +140,7 @@ pub(crate) const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 /// 「范围内全部账号均因额度用尽而不可用」的机器可识别标记
 ///
 /// 由 `describe_unavailable` 写入错误消息，供 HTTP 层映射为 402 而非 502 —— 额度耗尽
-/// 当月不可恢复，若按 5xx 返回会让客户端把它当作瞬态故障反复重试。
+/// 恢复必须等待冷却后的只读额度探测，按 5xx 返回会让客户端反复发送推理请求。
 pub const QUOTA_EXHAUSTED_ALL_MARKER: &str = "QUOTA_EXHAUSTED_ALL";
 /// 统计数据持久化防抖间隔
 pub(crate) const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);

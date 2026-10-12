@@ -1,18 +1,23 @@
 //! 凭据状态上报：限流（throttled）、成功（success）等运行时状态回报与轮转联动。
 use super::super::entry::{CredentialEntry, DisabledReason};
 use super::super::types::{
-    MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
+    CallContext, MAX_FAILURES_PER_CREDENTIAL, MultiTokenManager, QUOTA_EXHAUSTED_ALL_MARKER,
 };
 
-use chrono::{Datelike, Utc};
+use crate::kiro::model::credentials::KiroCredentials;
+use chrono::Utc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 impl MultiTokenManager {
     /// 报告指定账号被限流（429 响应）
-    pub fn report_throttled(&self, id: u64) {
+    pub(crate) fn report_throttled_for_context(&self, context: &CallContext) {
+        let id = context.id;
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            if !Self::context_matches_entry(entry, context) {
+                return;
+            }
             entry.throttle_count += 1;
             entry.last_throttled_at = Some(Instant::now());
             entry.last_throttled_wall = Some(Utc::now());
@@ -26,9 +31,13 @@ impl MultiTokenManager {
     ///
     /// 用于 429 场景：增加 rotation_bias 使选择算法优先选择其他账号，
     /// 不影响 success_count 和 failure_count
-    pub fn report_throttled_for_rotation(&self, id: u64) {
+    pub(crate) fn report_rotation_for_context(&self, context: &CallContext) {
+        let id = context.id;
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            if !Self::context_matches_entry(entry, context) {
+                return;
+            }
             entry.rotation_bias = entry.rotation_bias.saturating_add(1);
             tracing::debug!("账号 #{} rotation_bias 递增至 {}", id, entry.rotation_bias);
         }
@@ -40,10 +49,22 @@ impl MultiTokenManager {
     ///
     /// # Arguments
     /// * `id` - 账号 ID（来自 CallContext）
+    #[cfg(test)]
     pub fn report_success(&self, id: u64) {
-        {
+        self.report_success_checked(id, None);
+    }
+
+    pub(crate) fn report_success_for_context(&self, context: &CallContext) {
+        self.report_success_checked(context.id, Some(context));
+    }
+
+    fn report_success_checked(&self, id: u64, context: Option<&CallContext>) {
+        let succeeded = {
             let mut entries = self.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id && !e.disabled) {
+                if context.is_some_and(|context| !Self::context_matches_entry(entry, context)) {
+                    return;
+                }
                 entry.failure_count = 0;
                 entry.success_count += 1;
                 entry.rotation_bias = 0;
@@ -53,7 +74,21 @@ impl MultiTokenManager {
                     id,
                     entry.success_count
                 );
+                true
+            } else {
+                false
             }
+        };
+        if !succeeded {
+            return;
+        }
+        for binding in self
+            .sticky_cache
+            .lock()
+            .values_mut()
+            .filter(|e| e.credential_id == id)
+        {
+            binding.consecutive_throttles = 0;
         }
         self.save_stats_debounced();
     }
@@ -65,7 +100,16 @@ impl MultiTokenManager {
     ///
     /// # Arguments
     /// * `id` - 账号 ID（来自 CallContext）
+    #[cfg(test)]
     pub fn report_failure(&self, id: u64) -> bool {
+        self.report_failure_checked(id, None)
+    }
+
+    pub(crate) fn report_failure_for_context(&self, context: &CallContext) -> bool {
+        self.report_failure_checked(context.id, Some(context))
+    }
+
+    fn report_failure_checked(&self, id: u64, context: Option<&CallContext>) -> bool {
         let result = {
             let mut entries = self.entries.lock();
             let mut current_id = self.current_id.lock();
@@ -74,6 +118,10 @@ impl MultiTokenManager {
                 Some(e) => e,
                 None => return entries.iter().any(|e| !e.disabled),
             };
+
+            if context.is_some_and(|context| !Self::context_matches_entry(entry, context)) {
+                return entries.iter().any(|e| !e.disabled);
+            }
 
             // 已禁用的账号直接返回，避免覆盖其原始禁用原因（如 QuotaExceeded/Manual）。
             // 并发下若该账号已被 report_quota_exhausted 等禁用，这里不应再累加失败计数。
@@ -95,6 +143,7 @@ impl MultiTokenManager {
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
                 entry.disabled = true;
                 entry.disabled_reason = Some(DisabledReason::TooManyFailures);
+                self.start_recovery_cooldown(entry, Utc::now());
                 tracing::error!("账号 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 
                 // 切换到优先级最高的可用账号
@@ -134,7 +183,24 @@ impl MultiTokenManager {
     /// 立即禁用该账号，不计入 `refresh_failure_count`（永久性失效，需人工更换凭证，
     /// 与瞬态刷新失败区分，因此不参与全灭自愈）
     /// 返回是否还有可用账号
+    #[cfg(test)]
     pub fn report_refresh_token_invalid(&self, id: u64) -> bool {
+        self.report_invalid_refresh_checked(id, None)
+    }
+
+    pub(crate) fn report_invalid_refresh_for_credentials(
+        &self,
+        id: u64,
+        credentials: &KiroCredentials,
+    ) -> bool {
+        self.report_invalid_refresh_checked(id, Some(credentials))
+    }
+
+    fn report_invalid_refresh_checked(
+        &self,
+        id: u64,
+        credentials: Option<&KiroCredentials>,
+    ) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -143,12 +209,17 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
-            if entry.disabled {
+            if entry.disabled_reason == Some(DisabledReason::Manual)
+                || credentials.is_some_and(|snapshot| {
+                    !Self::same_outbound_identity(&entry.credentials, snapshot)
+                })
+            {
                 return entries.iter().any(|e| !e.disabled);
             }
 
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::InvalidRefreshToken);
+            entry.invalidate_recovery();
 
             tracing::error!(
                 "账号 #{} 的 refreshToken 已被服务端撤销（invalid_grant），已被禁用，需人工更换凭证",
@@ -167,7 +238,24 @@ impl MultiTokenManager {
     /// 增加 `refresh_failure_count`，达到 `MAX_FAILURES_PER_CREDENTIAL` 阈值后禁用账号
     /// （`disabled_reason = TooManyRefreshFailures`）
     /// 返回是否还有可用账号
+    #[cfg(test)]
     pub fn report_refresh_failure(&self, id: u64) -> bool {
+        self.report_refresh_failure_checked(id, None)
+    }
+
+    pub(crate) fn report_refresh_failure_for_credentials(
+        &self,
+        id: u64,
+        credentials: &KiroCredentials,
+    ) -> bool {
+        self.report_refresh_failure_checked(id, Some(credentials))
+    }
+
+    fn report_refresh_failure_checked(
+        &self,
+        id: u64,
+        credentials: Option<&KiroCredentials>,
+    ) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -177,6 +265,12 @@ impl MultiTokenManager {
             };
 
             if entry.disabled {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            if credentials
+                .is_some_and(|snapshot| !Self::same_outbound_identity(&entry.credentials, snapshot))
+            {
                 return entries.iter().any(|e| !e.disabled);
             }
 
@@ -193,6 +287,7 @@ impl MultiTokenManager {
             if refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
                 entry.disabled = true;
                 entry.disabled_reason = Some(DisabledReason::TooManyRefreshFailures);
+                self.start_recovery_cooldown(entry, Utc::now());
                 tracing::error!(
                     "账号 #{} 已连续刷新失败 {} 次，已被禁用",
                     id,
@@ -220,7 +315,16 @@ impl MultiTokenManager {
     /// - 立即禁用该账号（确定性配置缺陷，重试与继续失败计数均无意义）
     /// - 切换到下一个可用账号继续重试
     /// - 返回是否还有可用账号
+    #[cfg(test)]
     pub fn report_profile_arn_missing(&self, id: u64) -> bool {
+        self.report_profile_missing_checked(id, None)
+    }
+
+    pub(crate) fn report_profile_missing_for_context(&self, context: &CallContext) -> bool {
+        self.report_profile_missing_checked(context.id, Some(context))
+    }
+
+    fn report_profile_missing_checked(&self, id: u64, context: Option<&CallContext>) -> bool {
         let result = {
             let mut entries = self.entries.lock();
             let mut current_id = self.current_id.lock();
@@ -235,8 +339,13 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
+            if context.is_some_and(|context| !Self::context_matches_entry(entry, context)) {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::ProfileArnMissing);
+            entry.invalidate_recovery();
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             // 设为阈值，便于在管理面板中直观看到该账号已不可用
             entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
@@ -275,7 +384,16 @@ impl MultiTokenManager {
     /// - 立即禁用该账号（不等待连续失败阈值）
     /// - 切换到下一个可用账号继续重试
     /// - 返回是否还有可用账号
+    #[cfg(test)]
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
+        self.report_quota_checked(id, None)
+    }
+
+    pub(crate) fn report_quota_for_context(&self, context: &CallContext) -> bool {
+        self.report_quota_checked(context.id, Some(context))
+    }
+
+    fn report_quota_checked(&self, id: u64, context: Option<&CallContext>) -> bool {
         let result = {
             let mut entries = self.entries.lock();
             let mut current_id = self.current_id.lock();
@@ -289,16 +407,21 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
+            if context.is_some_and(|context| !Self::context_matches_entry(entry, context)) {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
             let now = Utc::now();
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
             entry.last_used_at = Some(now.to_rfc3339());
             entry.quota_exhausted_at = Some(now);
+            self.start_recovery_cooldown(entry, now);
             // 设为阈值，便于在管理面板中直观看到该账号已不可用
             entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
 
             tracing::error!(
-                "账号 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用（{} 后的自然月将自动恢复）",
+                "账号 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用并等待冷却后的只读额度探测（{}）",
                 id,
                 now.format("%Y-%m")
             );
@@ -324,53 +447,6 @@ impl MultiTokenManager {
         // 禁用原因是关键状态，跳过 30s 防抖立即落盘，避免进程重启丢失
         self.save_stats();
         result
-    }
-
-    /// 跨自然月后自动解除因额度用尽而禁用的账号
-    ///
-    /// Kiro 的 MONTHLY_REQUEST_COUNT 按自然月重置，因此只要当前月份不同于
-    /// 被判定耗尽时的月份，就应重新放回可用池；若下个月仍无额度，
-    /// 上游会再次返回 402 并重新禁用，代价仅一次请求。
-    ///
-    /// 返回被恢复的账号数量。
-    pub(crate) fn recover_expired_quota_disables(&self) -> usize {
-        let now = Utc::now();
-        let now_year_month = (now.year(), now.month());
-        let recovered = {
-            let mut entries = self.entries.lock();
-            let mut ids = Vec::new();
-            for e in entries.iter_mut() {
-                if !e.disabled || e.disabled_reason != Some(DisabledReason::QuotaExceeded) {
-                    continue;
-                }
-                // 缺失时间戳（旧版本数据）视为可恢复，避免账号被永久钉死
-                let same_month = e
-                    .quota_exhausted_at
-                    .is_some_and(|t| (t.year(), t.month()) == now_year_month);
-                if same_month {
-                    continue;
-                }
-                e.disabled = false;
-                e.disabled_reason = None;
-                e.quota_exhausted_at = None;
-                e.failure_count = 0;
-                ids.push(e.id);
-            }
-            ids
-        };
-
-        if !recovered.is_empty() {
-            tracing::info!(
-                "已跨自然月，自动恢复 {} 个额度耗尽的账号: {:?}",
-                recovered.len(),
-                recovered
-            );
-            if let Err(e) = self.persist_credentials() {
-                tracing::warn!("恢复额度耗尽账号后持久化失败: {}", e);
-            }
-            self.save_stats();
-        }
-        recovered.len()
     }
 
     /// 生成"无可用账号"的诊断文案

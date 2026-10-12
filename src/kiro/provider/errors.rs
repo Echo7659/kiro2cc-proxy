@@ -1,6 +1,5 @@
 //! 错误分类与退避：重试/限流退避延迟、月度限额与 Profile ARN 错误判定、请求体改写。
 use std::time::Duration;
-use tokio::time::sleep;
 
 use crate::anthropic::converter::native_thinking_supported;
 use crate::kiro::model::credentials::{KiroCredentials, fallback_profile_arn_value};
@@ -8,13 +7,7 @@ use crate::kiro::model::requests::conversation::HistoryAssistantMessage;
 
 use super::core::KiroProvider;
 
-const THROTTLE_BASE_MS: u64 = 2000;
-const THROTTLE_STEP_MS: u64 = 1000;
-const THROTTLE_MAX_MS: u64 = 8_000;
-const THROTTLE_JITTER_MAX_MS: u64 = 1500;
 const RETRY_BACKOFF_MAX_EXPONENT: usize = 6;
-const RPM_GATE_DEFAULT_WAIT_SECS: u64 = 3;
-const RPM_GATE_MAX_WAIT_SECS: u64 = 5;
 
 impl KiroProvider {
     pub(crate) fn retry_delay(attempt: usize) -> Duration {
@@ -27,55 +20,6 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
-    }
-
-    /// 429 限流退避：随 attempt 递增，避免固定间隔反复命中同一限流窗口
-    pub(crate) fn throttle_delay(attempt: usize) -> Duration {
-        // 2s + attempt×1s（上限 8s）+ jitter
-        let base =
-            THROTTLE_BASE_MS.saturating_add((attempt as u64).saturating_mul(THROTTLE_STEP_MS));
-        let capped = base.min(THROTTLE_MAX_MS);
-        let jitter = fastrand::u64(0..=THROTTLE_JITTER_MAX_MS);
-        Duration::from_millis(capped.saturating_add(jitter))
-    }
-
-    /// RPM 硬限制：精确等待到下一个 slot 释放（上限 5s，短兜底避免长尾阻塞）
-    ///
-    /// 返回 true 表示等待后已有 slot 可用或本身未满；返回 false 表示等待超时仍满
-    pub(crate) async fn wait_for_rpm_gate(&self, credential_id: u64, tag: &str) -> bool {
-        let Some(rpm) = &self.rpm_tracker else {
-            return true;
-        };
-        let max_rpm = self.token_manager.max_rpm_per_credential();
-        if max_rpm == 0 || rpm.credential_rpm(credential_id) < max_rpm as u64 {
-            return true;
-        }
-
-        // 精确计算等待时间
-        let wait_duration = rpm
-            .time_until_slot(credential_id, max_rpm)
-            .unwrap_or(Duration::from_secs(RPM_GATE_DEFAULT_WAIT_SECS))
-            .min(Duration::from_secs(RPM_GATE_MAX_WAIT_SECS));
-
-        tracing::info!(
-            "[RPM-GATE] credential={} rpm={} limit={}, waiting {:.1}s{}",
-            credential_id,
-            rpm.credential_rpm(credential_id),
-            max_rpm,
-            wait_duration.as_secs_f64(),
-            tag
-        );
-        sleep(wait_duration).await;
-
-        if rpm.credential_rpm(credential_id) >= max_rpm as u64 {
-            tracing::warn!(
-                "[RPM-GATE] credential={} still over limit after wait{}, proceeding anyway",
-                credential_id,
-                tag
-            );
-            return false;
-        }
-        true
     }
 
     pub(crate) fn is_monthly_request_limit(body: &str) -> bool {

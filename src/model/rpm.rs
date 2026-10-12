@@ -4,9 +4,9 @@
 //! 使用滑动窗口统计最近 60 秒内的请求数量，
 //! 支持全局、按账号、按 API Key 三个维度。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -51,21 +51,6 @@ impl TimestampQueue {
             .map(|b| b.count)
             .sum()
     }
-
-    /// 计算当 RPM 达到上限时，最早的一个 bucket 将在多少秒后滑出窗口
-    ///
-    /// 返回 None 表示当前未满或无有效 bucket
-    fn time_until_earliest_expires(&self, now_secs: u64) -> Option<u64> {
-        self.buckets
-            .iter()
-            .filter(|b| b.count > 0 && now_secs.saturating_sub(b.timestamp) < WINDOW_SECS as u64)
-            .map(|b| {
-                // bucket 在 (b.timestamp + WINDOW_SECS) 时滑出窗口
-                (b.timestamp + WINDOW_SECS as u64).saturating_sub(now_secs)
-            })
-            .min()
-            .map(|s| s.max(1))
-    }
 }
 
 /// RPM 追踪器
@@ -83,6 +68,8 @@ struct RpmTrackerInner {
     by_credential: HashMap<u64, TimestampQueue>,
     /// 按 API Key ID 分组
     by_api_key: HashMap<u32, TimestampQueue>,
+    /// Exact monotonic timestamps for atomic upstream admission. UI buckets remain separate.
+    admissions: HashMap<u64, VecDeque<Instant>>,
 }
 
 /// RPM 快照（用于 API 响应）
@@ -105,6 +92,7 @@ impl RpmTracker {
                 global: TimestampQueue::new(),
                 by_credential: HashMap::new(),
                 by_api_key: HashMap::new(),
+                admissions: HashMap::new(),
             }),
         }
     }
@@ -128,39 +116,58 @@ impl RpmTracker {
         }
     }
 
-    /// 记录账号维度的请求（在 provider 成功调用后调用）
-    pub fn record_credential(&self, credential_id: u64) {
+    /// Atomically reserve one actual upstream send attempt, including failures/retries.
+    /// A denied reservation changes no counters; max_rpm=0 explicitly disables admission limits.
+    pub fn try_admit_credential(&self, credential_id: u64, max_rpm: u32) -> Result<(), Duration> {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap();
+        let queue = inner.admissions.entry(credential_id).or_default();
+        while queue
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
+        {
+            queue.pop_front();
+        }
+        if max_rpm > 0 && queue.len() >= max_rpm as usize {
+            return Err(
+                Duration::from_secs(60).saturating_sub(now.duration_since(*queue.front().unwrap()))
+            );
+        }
+        queue.push_back(now);
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut inner = self.inner.lock().unwrap();
         inner
             .by_credential
             .entry(credential_id)
             .or_insert_with(TimestampQueue::new)
             .record(now_secs);
+        Ok(())
     }
 
     /// 计算指定账号在 RPM 满时，最快多久后会有一个 slot 释放
     ///
     /// 返回 None 表示当前 RPM 未满或无数据
     pub fn time_until_slot(&self, credential_id: u64, max_rpm: u32) -> Option<std::time::Duration> {
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let inner = self.inner.lock().unwrap();
-        let queue = inner.by_credential.get(&credential_id)?;
-        if queue.count(now_secs) < max_rpm as u64 {
+        if max_rpm == 0 {
             return None;
         }
-        queue
-            .time_until_earliest_expires(now_secs)
-            .map(std::time::Duration::from_secs)
+        let now = Instant::now();
+        let inner = self.inner.lock().unwrap();
+        let queue = inner.admissions.get(&credential_id)?;
+        let mut active = queue
+            .iter()
+            .filter(|t| now.duration_since(**t) < Duration::from_secs(60));
+        let oldest = active.next()?;
+        if 1 + active.count() < max_rpm as usize {
+            return None;
+        }
+        Some(Duration::from_secs(60).saturating_sub(now.duration_since(*oldest)))
     }
 
     /// 查询指定账号的当前 RPM
+    #[cfg(test)]
     pub fn credential_rpm(&self, credential_id: u64) -> u64 {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -214,6 +221,49 @@ impl RpmTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_admission_never_exceeds_account_rpm() {
+        let tracker = std::sync::Arc::new(RpmTracker::new());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(40));
+        let threads: Vec<_> = (0..40)
+            .map(|_| {
+                let tracker = tracker.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tracker.try_admit_credential(7, 10).is_ok()
+                })
+            })
+            .collect();
+        let admitted = threads
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(admitted, 10);
+        assert_eq!(tracker.credential_rpm(7), 10);
+        assert!(tracker.time_until_slot(7, 10).unwrap() > Duration::from_secs(59));
+        assert!(tracker.try_admit_credential(8, 10).is_ok());
+    }
+
+    #[test]
+    fn monotonic_admission_has_exact_sixty_second_boundary_and_explicit_unlimited() {
+        let tracker = RpmTracker::new();
+        tracker.inner.lock().unwrap().admissions.insert(
+            1,
+            VecDeque::from([Instant::now() - Duration::from_secs(59)]),
+        );
+        assert!(tracker.try_admit_credential(1, 1).is_err());
+        tracker.inner.lock().unwrap().admissions.insert(
+            1,
+            VecDeque::from([Instant::now() - Duration::from_secs(60)]),
+        );
+        assert!(tracker.try_admit_credential(1, 1).is_ok());
+        for _ in 0..100 {
+            assert!(tracker.try_admit_credential(1, 0).is_ok());
+        }
+        assert!(tracker.time_until_slot(1, 0).is_none());
+    }
 
     #[test]
     fn test_rpm_ring_buffer() {

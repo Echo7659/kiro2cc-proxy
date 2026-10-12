@@ -149,6 +149,9 @@ impl AdminService {
                     .map(|s| s.count_within(entry.id, since) as u64)
                     .unwrap_or(0),
                 disabled_reason: entry.disabled_reason,
+                next_recovery_probe_at: entry.next_recovery_probe_at,
+                recovery_probe_in_flight: entry.recovery_probe_in_flight,
+                recovery_failures: entry.recovery_failures,
             })
             .collect();
 

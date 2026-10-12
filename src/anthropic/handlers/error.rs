@@ -4,6 +4,7 @@
 use crate::anthropic::stream::{CLIENT_ASSUMED_CONTEXT_WINDOW, scale_for_client};
 use crate::anthropic::types::{ErrorResponse, MessagesRequest};
 
+use crate::kiro::provider::{AccountUnavailableError, RateLimitError, StaleContextError};
 use crate::kiro::token_manager::QUOTA_EXHAUSTED_ALL_MARKER;
 use anyhow::Error;
 use axum::{
@@ -30,6 +31,30 @@ pub(crate) fn map_provider_error_with_context(
     model: &str,
     estimated_input_tokens: i32,
 ) -> Response {
+    if err.downcast_ref::<AccountUnavailableError>().is_some()
+        || err.downcast_ref::<StaleContextError>().is_some()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(
+                "overloaded_error",
+                "Upstream account capacity is temporarily unavailable.",
+            )),
+        )
+            .into_response();
+    }
+    if let Some(limit) = err.downcast_ref::<RateLimitError>() {
+        let retry_after = limit.retry_after_secs().to_string();
+        tracing::warn!(error = %err, "上游准入被限流，返回 429 和实际等待时间");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after)],
+            Json(ErrorResponse::new(
+                "rate_limit_error",
+                "Upstream request capacity is temporarily unavailable. Retry after the indicated delay.",
+            )),
+        ).into_response();
+    }
     let err_str = err.to_string();
 
     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）
@@ -156,5 +181,47 @@ pub(crate) fn parse_messages_request(body: &[u8]) -> Result<MessagesRequest, Res
             )
                 .into_response())
         }
+    }
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn account_disabled_while_queued_returns_service_unavailable() {
+        let response = map_provider_error_with_context(
+            AccountUnavailableError.into(),
+            "claude-sonnet-4-5",
+            20,
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "overloaded_error");
+    }
+
+    #[tokio::test]
+    async fn admission_limit_preserves_retry_after_without_disclosing_account_identity() {
+        let error = anyhow::Error::new(RateLimitError {
+            retry_after: Duration::from_millis(12_001),
+            reason: "account concurrency queue timed out",
+            credential_id: Some(12345),
+        })
+        .context("upstream admission");
+        let response = map_provider_error_with_context(error, "claude-sonnet-4-5", 20);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "13");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "rate_limit_error");
+        let message = json["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("12345"));
+        assert!(!message.contains("concurrency queue"));
     }
 }

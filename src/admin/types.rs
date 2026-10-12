@@ -71,6 +71,11 @@ pub struct CredentialStatusItem {
     /// 禁用原因（None = 未禁用；QuotaExceeded 时前端显示「额度已用尽」而非通用「已禁用」）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<crate::kiro::token_manager::DisabledReason>,
+    /// 自动禁用后的下一次只读验活时间，手动禁用不安排验活。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_recovery_probe_at: Option<String>,
+    pub recovery_probe_in_flight: bool,
+    pub recovery_failures: u32,
 }
 
 // ============ 操作请求 ============
@@ -139,7 +144,7 @@ pub struct AddCredentialRequest {
     pub api_region: Option<String>,
 
     /// 账号级 Machine ID（可选，64 位字符串）
-    /// 未配置时回退到 config.json 的 machineId
+    /// 未配置时生成并持久化账号自己的标识；不共用全局 machineId。
     pub machine_id: Option<String>,
 
     /// 用户邮箱（可选，用于前端显示）
@@ -191,6 +196,9 @@ mod tests {
             health_status: crate::kiro::token_manager::HealthStatus::Healthy,
             throttle_count: 0,
             disabled_reason: None,
+            next_recovery_probe_at: None,
+            recovery_probe_in_flight: false,
+            recovery_failures: 0,
         }
     }
 

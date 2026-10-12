@@ -360,6 +360,19 @@ export function BalanceDialog({ credentialId, credential, open, onOpenChange }: 
                 </span>
               </div>
 
+              {credential.disabled && (credential.nextRecoveryProbeAt || credential.recoveryProbeInFlight) && (
+                <div className="grid grid-cols-2 gap-3 rounded-lg border border-hairline bg-surface p-3" role="status">
+                  <InfoRow
+                    label={t('credentials.recoveryStateLabel')}
+                    value={t(credential.recoveryProbeInFlight ? 'credentials.recoveryProbing' : 'credentials.recoveryWaiting')}
+                  />
+                  <InfoRow
+                    label={t('credentials.nextRecoveryProbeAtLabel')}
+                    value={formatIso(credential.nextRecoveryProbeAt ?? null)}
+                  />
+                </div>
+              )}
+
               {/* 关键调用指标矩阵 */}
               <div className="grid grid-cols-3 divide-x divide-hairline rounded-lg border border-hairline bg-surface p-2 px-2.5 text-center">
                 <div>
