@@ -270,7 +270,9 @@ fn build_web_search_visibility_events(
         events.push(stop);
     }
 
-    events
+    // 桥接事件直接发给消费者，不经过 process_kiro_event 的统一出口。
+    // 原生思考的 raw stop 也必须在搜索边界完成文本化收尾。
+    ctx.render_outbound(events)
 }
 
 /// 构造 `web_search_tool_result` 可见性块（D4，携带真实 MCP 搜索结果）
@@ -305,7 +307,7 @@ pub(crate) fn build_web_search_result_events(
         events.push(stop);
     }
 
-    events
+    ctx.render_outbound(events)
 }
 
 /// 构建续请求体（D3：手工构建，绕过 validate_tool_pairing）

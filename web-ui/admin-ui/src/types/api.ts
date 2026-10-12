@@ -30,6 +30,10 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  proxyPoolId?: number | null
+  proxyRouteStatus?: 'healthy' | 'pending' | 'unavailable' | null
+  proxyMode?: 'pool' | 'manual' | 'direct' | 'global'
+  effectiveProxyUrl?: string | null
   /** 账号级 thinking adaptive 注入开关（客户端请求 thinking: adaptive 时按此开关注入 Kiro） */
   thinkingAdaptive: boolean
   healthStatus: 'healthy' | 'warning' | 'degraded' | 'unhealthy' | 'disabled'
@@ -49,6 +53,36 @@ export interface CredentialStatusItem {
   nextRecoveryProbeAt?: string
   recoveryProbeInFlight?: boolean
   recoveryFailures?: number
+}
+
+export interface ProxySummary {
+  id: number
+  /** Safe gateway address; never contains authentication userinfo. */
+  url: string
+  usernameMasked: string | null
+  hasAuth: boolean
+  enabled: boolean
+  status: 'unknown' | 'healthy' | 'unhealthy'
+  lastCheckedAt: string | null
+  latencyMs: number | null
+  exitIp: string | null
+  failureCount: number
+  cooldownUntil: string | null
+  checking: boolean
+  assignedAccounts: number
+  assignedAccountIds: number[]
+}
+
+export interface ProxiesResponse {
+  proxies: ProxySummary[]
+  configured: boolean
+}
+
+export interface ImportProxiesResponse {
+  imported: number
+  duplicates: number
+  rejected: number
+  errors: { line: number; message: string }[]
 }
 
 // 余额响应

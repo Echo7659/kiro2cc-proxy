@@ -11,5 +11,10 @@
   "upstreamAdmissionTimeoutSecs": 30,
   "accountRecoveryCooldownSecs": 300,
   "accountRecoveryMaxCooldownSecs": 3600,
-  "accountRecoveryProbeTimeoutSecs": 30
+  "accountRecoveryProbeTimeoutSecs": 30,
+  "proxyHealthCheckUrl": "https://checkip.amazonaws.com/",
+  "proxyHealthCheckTimeoutSecs": 10,
+  "proxyHealthCheckIntervalSecs": 300,
+  "proxyHealthCheckConcurrency": 4,
+  "proxyFailureCooldownSecs": 60
 }

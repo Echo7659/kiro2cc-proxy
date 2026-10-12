@@ -6,6 +6,7 @@ use crate::anthropic::types::{ErrorResponse, MessagesRequest};
 
 use crate::kiro::provider::{AccountUnavailableError, RateLimitError, StaleContextError};
 use crate::kiro::token_manager::QUOTA_EXHAUSTED_ALL_MARKER;
+use crate::model::proxy_pool::ProxyUnavailableError;
 use anyhow::Error;
 use axum::{
     http::{StatusCode, header},
@@ -31,6 +32,17 @@ pub(crate) fn map_provider_error_with_context(
     model: &str,
     estimated_input_tokens: i32,
 ) -> Response {
+    if err.downcast_ref::<ProxyUnavailableError>().is_some() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "30")],
+            Json(ErrorResponse::new(
+                "overloaded_error",
+                "No healthy managed proxy is currently available. Please retry later.",
+            )),
+        )
+            .into_response();
+    }
     if err.downcast_ref::<AccountUnavailableError>().is_some()
         || err.downcast_ref::<StaleContextError>().is_some()
     {
@@ -223,5 +235,21 @@ mod protection_tests {
         let message = json["error"]["message"].as_str().unwrap();
         assert!(!message.contains("12345"));
         assert!(!message.contains("concurrency queue"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_proxy_returns_retryable_503_without_disclosing_proxy_auth() {
+        let error = anyhow::Error::new(ProxyUnavailableError)
+            .context("proxy=http://demo-user:demo-password@gateway.example");
+        let response = map_provider_error_with_context(error, "claude-sonnet-4-5", 20);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "30");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "overloaded_error");
+        assert!(!String::from_utf8_lossy(&body).contains("demo-password"));
+        assert!(!String::from_utf8_lossy(&body).contains("gateway.example"));
     }
 }

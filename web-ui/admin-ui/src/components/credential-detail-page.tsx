@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { CredentialProxyInfo } from '@/components/credential-proxy-info'
 import { toast } from 'sonner'
 import { RotateCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -126,6 +127,7 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
         }
       />
 
+      {credential && <CredentialProxyInfo credential={credential} />}
       {/* 指标条（设计稿 .metrics）：主值统一 ink 色，费用/积分不再单独染色 */}
       <MetricsBar cols={5}>
         <Metric label={t('common.statTotalRequests')}>

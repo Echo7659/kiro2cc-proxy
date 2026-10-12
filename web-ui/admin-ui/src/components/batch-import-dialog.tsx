@@ -44,6 +44,9 @@ interface CredentialInput {
   profileArn?: string
   priority?: number
   machineId?: string
+  proxyUrl?: string
+  proxyUsername?: string
+  proxyPassword?: string
   /** 登录来源（仅 Google / GitHub 会被归一化后写入） */
   provider?: string
 }
@@ -83,6 +86,15 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   const { mutateAsync: addCredential } = useAddCredential()
   const { mutateAsync: setDisabled } = useSetDisabled()
 
+  function parseImportJson(text: string) {
+    try {
+      return JSON.parse(text)
+    } catch {
+      // Native SyntaxError messages can quote input containing proxy credentials.
+      throw new Error(t('credentials.importJsonSyntaxError'))
+    }
+  }
+
   const resetForm = () => {
     setJsonInput('')
     setProgress({ current: 0, total: 0 })
@@ -94,7 +106,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   const handleBatchImport = async () => {
     try {
       // 1. 解析 JSON
-      const parsed = JSON.parse(jsonInput)
+      const parsed = parseImportJson(jsonInput)
       let credentials: CredentialInput[]
       if (Array.isArray(parsed)) {
         credentials = parsed
@@ -105,6 +117,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             refreshToken: a.credentials?.refreshToken,
             email: a.email || a.nickname,
             machineId: a.machineId,
+            proxyUrl: a.proxyUrl ?? a.credentials?.proxyUrl,
+            proxyUsername: a.proxyUsername ?? a.credentials?.proxyUsername,
+            proxyPassword: a.proxyPassword ?? a.credentials?.proxyPassword,
             authRegion: a.credentials?.region,
             authMethod: a.credentials?.authMethod,
             clientId: a.credentials?.clientId || undefined,
@@ -210,6 +225,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             profileArn: cred.profileArn?.trim() || undefined,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
+            proxyUrl: cred.proxyUrl?.trim() || undefined,
+            proxyUsername: cred.proxyUsername || undefined,
+            proxyPassword: cred.proxyPassword || undefined,
             provider: cred.provider,
             disabled: true,
           })
@@ -352,7 +370,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
   const handleFormat = () => {
     try {
-      setJsonInput(JSON.stringify(JSON.parse(jsonInput), null, 2))
+      setJsonInput(JSON.stringify(parseImportJson(jsonInput), null, 2))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       toast.error(t('credentials.toastJsonError', { message }))
@@ -442,6 +460,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           </DialogTitle>
         </DialogHeader>
 
+        <p className="rounded-[8px] border border-brand-line bg-brand-soft p-3 text-[12px] leading-relaxed text-ink-2">{t('proxies.accountImportHint')}</p>
         <div className="flex-1 overflow-y-auto space-y-4 pb-4">
           <div className="space-y-2">
             {/* 快捷工具栏 */}

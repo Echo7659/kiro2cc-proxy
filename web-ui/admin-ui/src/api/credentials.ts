@@ -22,6 +22,9 @@ import type {
   FailureLogsResponse,
   ModelsResponse,
   ReleaseNotesResponse,
+  ProxiesResponse,
+  ProxySummary,
+  ImportProxiesResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -31,6 +34,36 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+export async function getProxies(signal?: AbortSignal): Promise<ProxiesResponse> {
+  const { data } = await api.get<ProxiesResponse>('/proxies', { signal })
+  return data
+}
+
+export async function importProxies(text: string): Promise<ImportProxiesResponse> {
+  const { data } = await api.post<ImportProxiesResponse>('/proxies/import', { text })
+  return data
+}
+
+export async function checkProxies(): Promise<{ scheduled: boolean }> {
+  const { data } = await api.post<{ scheduled: boolean }>('/proxies/check')
+  return data
+}
+
+export async function checkProxy(id: number): Promise<{ scheduled: boolean }> {
+  const { data } = await api.post<{ scheduled: boolean }>(`/proxies/${id}/check`)
+  return data
+}
+
+export async function setProxyEnabled(id: number, enabled: boolean): Promise<{ proxy: ProxySummary }> {
+  const { data } = await api.put<{ proxy: ProxySummary }>(`/proxies/${id}/enabled`, { enabled })
+  return data
+}
+
+export async function deleteProxy(id: number): Promise<{ deleted: boolean }> {
+  const { data } = await api.delete<{ deleted: boolean }>(`/proxies/${id}`)
+  return data
+}
 
 // 请求拦截器添加 API Key
 api.interceptors.request.use((config) => {

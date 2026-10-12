@@ -20,6 +20,80 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_stream_context_thinking_to_text_has_paired_blocks_without_ansi() {
+        use crate::anthropic::stream::ThinkingTextStyle;
+        use serde_json::json;
+        use std::collections::BTreeSet;
+
+        let mut context = StreamContext::new_with_thinking("claude-sonnet-4.6", 100, true)
+            .with_thinking_as_text(Some(ThinkingTextStyle::Plain));
+        let mut events = context.generate_initial_events();
+        for payload in [
+            json!({"text":"第一行\n第二"}),
+            json!({"text":"行","signature":"synthetic-signature"}),
+        ] {
+            events.extend(
+                context.process_kiro_event(&upstream_event("reasoningContentEvent", payload)),
+            );
+        }
+        events.extend(context.process_kiro_event(&upstream_event(
+            "assistantResponseEvent",
+            json!({"content":"最终正文"}),
+        )));
+        events.extend(context.generate_final_events());
+
+        let text: String = events
+            .iter()
+            .filter_map(|event| event.data["delta"]["text"].as_str())
+            .collect();
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.starts_with("💭 Thinking\n\n第一行  \n第二行"));
+        assert_eq!(text.matches("💭 Thought for ").count(), 1);
+        assert!(text.ends_with("最终正文"));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.data["content_block"]["type"] != "thinking"
+                    && event.data["delta"]["type"] != "thinking_delta"
+                    && event.data["delta"]["type"] != "signature_delta")
+        );
+        let mut open = BTreeSet::new();
+        let mut started = BTreeSet::new();
+        for event in &events {
+            match event.event.as_str() {
+                "content_block_start" => {
+                    let index = event.data["index"].as_i64().unwrap();
+                    assert_eq!(event.data["content_block"]["type"], "text");
+                    assert!(started.insert(index) && open.insert(index));
+                }
+                "content_block_delta" => {
+                    assert!(open.contains(&event.data["index"].as_i64().unwrap()))
+                }
+                "content_block_stop" => {
+                    assert!(open.remove(&event.data["index"].as_i64().unwrap()))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(started.len(), 2);
+        assert!(open.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_stop")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn test_native_reasoning_frames_preserve_text_signature_and_boundaries() {
         use serde_json::json;
 

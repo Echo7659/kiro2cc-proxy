@@ -114,6 +114,10 @@ impl AdminService {
         self
     }
 
+    pub(crate) fn proxy_bindings(&self) -> HashMap<u64, Vec<u64>> {
+        self.token_manager.proxy_bindings()
+    }
+
     /// 获取所有账号状态
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
@@ -141,6 +145,10 @@ impl AdminService {
                 last_used_at: entry.last_used_at.clone(),
                 has_proxy: entry.has_proxy,
                 proxy_url: entry.proxy_url,
+                proxy_pool_id: entry.proxy_pool_id,
+                proxy_route_status: entry.proxy_route_status,
+                proxy_mode: entry.proxy_mode,
+                effective_proxy_url: entry.effective_proxy_url,
                 thinking_adaptive: entry.thinking_adaptive,
                 health_status: entry.health_status,
                 throttle_count: self
@@ -345,6 +353,8 @@ impl AdminService {
             nickname: req.nickname,
             subscription_title: None, // 将在首次获取使用额度时自动更新
             proxy_url: req.proxy_url,
+            proxy_pool_id: None,
+            proxy_pool_generation: None,
             proxy_username: req.proxy_username,
             proxy_password: req.proxy_password,
             disabled: initially_disabled,
@@ -539,6 +549,11 @@ impl AdminService {
 
     /// 分类不涉及上游请求的简单操作错误
     fn classify_error(&self, e: anyhow::Error, id: u64) -> AdminServiceError {
+        if e.downcast_ref::<crate::model::proxy_pool::ProxyUnavailableError>()
+            .is_some()
+        {
+            return AdminServiceError::ProxyUnavailable;
+        }
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
@@ -563,6 +578,11 @@ impl AdminService {
 
     /// 分类余额查询错误（可能涉及上游 API 调用）
     fn classify_balance_error(&self, e: anyhow::Error, id: u64) -> AdminServiceError {
+        if e.downcast_ref::<crate::model::proxy_pool::ProxyUnavailableError>()
+            .is_some()
+        {
+            return AdminServiceError::ProxyUnavailable;
+        }
         let details = format!("{e:#}");
 
         // 1. 账号不存在
@@ -596,6 +616,11 @@ impl AdminService {
 
     /// 分类添加账号错误
     fn classify_add_error(&self, e: anyhow::Error) -> AdminServiceError {
+        if e.downcast_ref::<crate::model::proxy_pool::ProxyUnavailableError>()
+            .is_some()
+        {
+            return AdminServiceError::ProxyUnavailable;
+        }
         let msg = e.to_string();
 
         // 账号验证失败（refreshToken 无效、格式错误等）
@@ -637,6 +662,11 @@ impl AdminService {
 
     /// 分类更新账号错误
     fn classify_update_error(&self, e: anyhow::Error, id: u64) -> AdminServiceError {
+        if e.downcast_ref::<crate::model::proxy_pool::ProxyUnavailableError>()
+            .is_some()
+        {
+            return AdminServiceError::ProxyUnavailable;
+        }
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
@@ -755,6 +785,31 @@ mod tests {
                 assert_eq!(message, "账号 #1 的上游服务暂时不可用");
             }
             other => panic!("预期 UpstreamError，实际: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unavailable_proxy_is_service_unavailable_for_all_account_operations() {
+        let manager = MultiTokenManager::new(Config::default(), vec![], None, None, false).unwrap();
+        let service = AdminService::new(Arc::new(manager));
+        let error = || {
+            anyhow::Error::new(crate::model::proxy_pool::ProxyUnavailableError)
+                .context("proxy=http://demo-user:demo-password@gateway.example")
+        };
+        let classified = [
+            service.classify_error(error(), 1),
+            service.classify_balance_error(error(), 1),
+            service.classify_enable_error(error(), 1),
+            service.classify_add_error(error()),
+            service.classify_update_error(error(), 1),
+        ];
+        for result in classified {
+            assert!(matches!(result, AdminServiceError::ProxyUnavailable));
+            assert_eq!(
+                result.status_code(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(!result.to_string().contains("demo-password"));
         }
     }
 

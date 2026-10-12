@@ -81,6 +81,13 @@ struct ResponseLease {
 }
 
 impl ResponseLease {
+    fn body_read_failed(&self) {
+        // 原始响应体读取失败可能被 reqwest 标为 decode（如截断），仍须独立确认出口。
+        // 这里仅安排未来绑定检查；不会重发已交给消费者的数据，也不把取消视为故障。
+        if let Some((manager, context)) = &self.success {
+            manager.schedule_proxy_body_failure(context);
+        }
+    }
     fn complete(mut self) {
         if let Some((manager, context)) = self.success.take() {
             manager.report_success_for_context(&context);
@@ -119,6 +126,11 @@ impl UpstreamResponse {
     pub async fn text(self) -> Result<String, reqwest::Error> {
         let Self { inner, lease } = self;
         let result = inner.text().await;
+        if result.is_err()
+            && let Some(lease) = &lease
+        {
+            lease.body_read_failed();
+        }
         if result.is_ok()
             && let Some(lease) = lease
         {
@@ -130,6 +142,11 @@ impl UpstreamResponse {
     pub async fn bytes(self) -> Result<Bytes, reqwest::Error> {
         let Self { inner, lease } = self;
         let result = inner.bytes().await;
+        if result.is_err()
+            && let Some(lease) = &lease
+        {
+            lease.body_read_failed();
+        }
         if result.is_ok()
             && let Some(lease) = lease
         {
@@ -142,6 +159,11 @@ impl UpstreamResponse {
     pub async fn json<T: DeserializeOwned>(self) -> Result<T, reqwest::Error> {
         let Self { inner, lease } = self;
         let result = inner.json().await;
+        if result.is_err()
+            && let Some(lease) = &lease
+        {
+            lease.body_read_failed();
+        }
         if result.is_ok()
             && let Some(lease) = lease
         {
@@ -181,6 +203,9 @@ impl Stream for ResponseStream {
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Err(err))) => {
+                if let Some(lease) = &self.lease {
+                    lease.body_read_failed();
+                }
                 self.inner = None;
                 self.lease = None;
                 Poll::Ready(Some(Err(err)))
@@ -323,7 +348,27 @@ impl KiroProvider {
         request: reqwest::RequestBuilder,
     ) -> anyhow::Result<UpstreamResponse> {
         let mut lease = self.admit(context).await?;
-        let inner = request.send().await?;
+        let inner = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let proxy_fault = error.is_connect() || error.is_timeout();
+                drop(lease);
+                if proxy_fault && context.credentials.proxy_pool_id.is_some() {
+                    self.token_manager.confirm_proxy_failure(context).await?;
+                }
+                return Err(error.without_url().into());
+            }
+        };
+        if inner.status().as_u16() == 407 && context.credentials.proxy_pool_id.is_some() {
+            let error = inner
+                .error_for_status_ref()
+                .expect_err("407 is an error")
+                .without_url();
+            drop(inner);
+            drop(lease);
+            self.token_manager.confirm_proxy_failure(context).await?;
+            return Err(error.into());
+        }
         if inner.status().is_success() {
             lease.success = Some((self.token_manager.clone(), context.clone()));
         }

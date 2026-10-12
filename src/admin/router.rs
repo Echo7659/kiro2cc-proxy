@@ -24,12 +24,22 @@ use super::{
     },
     log_handler::{download_logs, snapshot_logs, stream_logs},
     middleware::{AdminState, admin_auth_middleware},
+    proxies::{
+        check_all_proxies, check_proxy, delete_proxy, import_proxies, list_proxies,
+        set_proxy_enabled,
+    },
 };
 
 /// 创建 Admin API 路由
 pub fn create_admin_router(state: AdminState) -> Router {
     // 受 header 认证中间件保护的路由
     let protected = Router::new()
+        .route("/proxies", get(list_proxies))
+        .route("/proxies/import", post(import_proxies))
+        .route("/proxies/check", post(check_all_proxies))
+        .route("/proxies/{id}/check", post(check_proxy))
+        .route("/proxies/{id}/enabled", put(set_proxy_enabled))
+        .route("/proxies/{id}", delete(delete_proxy))
         .route(
             "/credentials",
             get(get_all_credentials).post(add_credential),

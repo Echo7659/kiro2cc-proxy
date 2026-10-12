@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
+import { CredentialProxyInfo } from '@/components/credential-proxy-info'
 import { toast } from 'sonner'
 import { Boxes, FileText, Lightbulb, LightbulbOff, MoreHorizontal, Pencil, Power, RefreshCw, Trash2, Wallet } from 'lucide-react'
 import { EditCredentialDialog } from '@/components/edit-credential-dialog'
@@ -212,14 +213,7 @@ export function AccountRow({
               >
                 {credential.email ? maskEmail(credential.email) : '—'}
               </span>
-              {credential.hasProxy && credential.proxyUrl && (
-                <span
-                  title={t('credentials.proxyLabel', { url: credential.proxyUrl })}
-                  className="flex-none rounded-[4px] border border-brand-line bg-brand-soft px-[3px] text-[9px] font-semibold tracking-[0.04em] text-brand"
-                >
-                  PROXY
-                </span>
-              )}
+              <CredentialProxyInfo credential={credential} compact />
               {credential.hasProfileArn && (
                 <span
                   title={t('credentials.profileArnBadge')}

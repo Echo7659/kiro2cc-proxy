@@ -62,6 +62,13 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_pool_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_route_status: Option<String>,
+    pub proxy_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_proxy_url: Option<String>,
     /// 账号级 thinking adaptive 注入开关（前端按钮显示当前状态）
     pub thinking_adaptive: bool,
     /// 健康状态
@@ -192,6 +199,10 @@ mod tests {
             last_used_at: None,
             has_proxy: false,
             proxy_url: None,
+            proxy_pool_id: None,
+            proxy_route_status: None,
+            proxy_mode: "global".to_string(),
+            effective_proxy_url: None,
             thinking_adaptive: true,
             health_status: crate::kiro::token_manager::HealthStatus::Healthy,
             throttle_count: 0,

@@ -40,6 +40,7 @@
 | **🛠️ 工具调用** | 完整支持 function calling / tool use |
 | **🛡️ Admin 管理** | 可选的 Web 管理界面，支持账号管理、余额查询等 |
 | **🌐 账号级代理** | 支持为每个账号单独配置 HTTP/SOCKS5 代理 |
+| **🌐 代理池** | 批量导入代理，账号优先独占、数量不足时共享，确认故障后自动切换 |
 
 ---
 
@@ -469,7 +470,7 @@ bash start_server.sh restart   # 重启
 
 ### 多端点负载均衡（v2.8.7+）
 
-Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazonq`）走独立的限流桶。本代理在单账号内自动轮询这些端点：429 时只封禁命中桶（30s 后自动恢复），不影响其它端点、不切换账号。
+Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazonq`）各自记录限流状态。本代理可以轮询这些端点，但收到 429 后也会按 `Retry-After` 冷却整个账号，避免换端点继续请求同一账号；没有有效响应头时默认等待 30 秒。
 
 默认启用全部 4 端点。账号可通过 `endpoint` 字段声明首选端点（首选在首 + 剩余端点按默认序去重追加）：
 
@@ -501,6 +502,11 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `proxyUrl` | 否 | — | HTTP/SOCKS5 代理，如 `http://127.0.0.1:7890` |
 | `proxyUsername` | 否 | — | 代理用户名 |
 | `proxyPassword` | 否 | — | 代理密码 |
+| `proxyHealthCheckUrl` | 否 | `https://checkip.amazonaws.com/` | 代理 HTTPS/IP 健康检查目标；不携带账号凭据 |
+| `proxyHealthCheckTimeoutSecs` | 否 | `10` | 容量等待与实际网络检测分别使用此超时，范围 1–10 秒；排队超时不判定故障 |
+| `proxyHealthCheckIntervalSecs` | 否 | `300` | 健康代理重新检测间隔，范围 30–604800 秒 |
+| `proxyHealthCheckConcurrency` | 否 | `4` | 代理检测并发，范围 1–4；自动每轮最多 25 条 |
+| `proxyFailureCooldownSecs` | 否 | `60` | 故障代理冷却后重新检测的等待秒数 |
 | `tlsBackend` | 否 | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
 | `loadBalancingMode` | 否 | `priority` | `priority`（按优先级）或 `balanced`（轮询） |
 | `maxRpmPerCredential` | 否 | `10` | 单个账号每分钟实际转发尝试上限，包括失败与重试；`0` 显式关闭 RPM 保护。设置页保存后立即热生效 |
@@ -513,7 +519,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `forwardSuggestionMode` | 否 | `false` | Suggestion Mode 输入建议请求放行开关。`false`（默认）时服务端拦截 Claude Code 每轮对话后自动发起的全量上下文预测请求并返回空响应，不产生 Token 消耗；`true` 时正常转发上游，以展示输入建议，但每轮会额外产生一次全量上下文计费请求。可用环境变量 `FORWARD_SUGGESTION_MODE` 覆盖 |
 | `clientTokenPassthrough` | 否 | `false` | 客户端 token 直通：`true` 时返回给客户端的 `usage` 字段 1:1 上报真实值；`false`（默认）时按 `0.6657` 系数缩放展示。适用于按返回用量统计上下文占用的第三方客户端；无论开关状态如何，Claude Code 的 auto-compact 触发时机保持不变。可用环境变量 `CLIENT_TOKEN_PASSTHROUGH` 覆盖 |
 | `writeChunkingMaxLines` | 否 | `300` | 分块写入约束的行数上限（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
-| `thinkingAsText` | 否 | `false` | 思考内容文本化（仅 Claude Code 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本、以 ANSI 变暗（灰色）样式逐行流式展示（类似 Kiro CLI），解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。两种模式下客户端（Claude Code）上下文都包含思考内容，但回传上游时都会整块丢弃：关闭时丢弃原生 thinking 块，开启时丢弃「💭 Thinking」标记行、思考正文与时长行，上游上下文不含思考内容（仅当流被中断、缺少时长行时，保守降级为只剥标记行）。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
+| `thinkingAsText` | 否 | `false` | 思考内容文本化（Claude Code / Claude Desktop 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本。Claude Code 使用 ANSI 变暗（灰色）样式，Claude Desktop 使用无 ANSI 的纯文本样式逐行流式展示，解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。两种模式下客户端（Claude Code）上下文都包含思考内容，但回传上游时都会整块丢弃：关闭时丢弃原生 thinking 块，开启时丢弃「💭 Thinking」标记行、思考正文与时长行，上游上下文不含思考内容（仅当流被中断、缺少时长行时，保守降级为只剥标记行）。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
 
 > **TLS 说明**：如遇到 Token 刷新失败或请求报错，尝试将 `tlsBackend` 改为 `native-tls`。
 
@@ -554,6 +560,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 > **客户端鉴权说明**：`config.json` 不再提供全局 API Key。客户端调用 `/v1/messages`、`/cc/v1/messages` 时，需使用 Admin 后台（`adminPsw` 登录）创建并启用的子 API Key 进行鉴权。注：若未配置 `adminPsw`，Admin 面板本身将被禁用，无法创建子 API Key，需先完成配置。
 
 ### 账号级代理
+
+Admin 的「代理列表」支持批量导入 `host:port:username:password`，自动为没有显式代理的新账号分配健康代理，优先独占、不足时共享。账号绑定保持稳定，确认连接故障后才切换；配置过的代理池没有健康节点时暂停请求，不会静默直连。持久化、检测和导入格式详见[代理池说明](docs/proxy-pool.md)。
 
 可以为每个账号单独配置代理，优先级高于全局代理：
 

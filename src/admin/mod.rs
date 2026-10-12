@@ -26,6 +26,7 @@ mod handlers;
 mod log_handler;
 mod middleware;
 mod model_release;
+mod proxies;
 mod router;
 mod service;
 pub mod types;

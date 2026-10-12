@@ -175,6 +175,147 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_plain_bridge_search_and_continuation_preserve_event_contract() {
+        use super::super::super::bridge::{BridgeRoundOutcome, harvest_bridge_round};
+        use crate::anthropic::stream::ThinkingTextStyle;
+        use crate::kiro::model::events::{AssistantResponseEvent, ReasoningContentEvent};
+        use crate::kiro::parser::decoder::EventStreamDecoder;
+        use std::collections::BTreeSet;
+
+        let mut context = StreamContext::new_with_thinking("claude-sonnet-4.6", 100, true)
+            .with_thinking_as_text(Some(ThinkingTextStyle::Plain));
+        let mut events = context.generate_initial_events();
+        let mut bridge = Some(BridgeState::new(Some(3)));
+        events.extend(context.process_kiro_event(&Event::ReasoningContent(
+            ReasoningContentEvent {
+                text: "搜索前\n推理".into(),
+                signature: "synthetic-first-signature".into(),
+            },
+        )));
+        let (consumed, search_events) = bridge_handle_event(
+            &mut context,
+            &mut bridge,
+            &tool_use_event("web_search", "plain-search", r#"{"query":"rust"}"#, true),
+        );
+        assert!(consumed);
+        events.extend(search_events);
+        let before_search: String = events
+            .iter()
+            .filter_map(|event| event.data["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(
+            before_search.matches("💭 Thought for ").count(),
+            1,
+            "思考块在搜索边界也必须完整收尾"
+        );
+
+        let pending = bridge.as_mut().unwrap().pending.pop_front().unwrap();
+        let continuation = build_continuation_request(
+            &bridge_ctx_for_continuation(),
+            None,
+            vec![build_search_tool_result(
+                &pending.tool_use_id,
+                &pending.query,
+                &Some(sample_search_results()),
+            )],
+        );
+        assert_eq!(
+            continuation
+                .conversation_state
+                .agent_continuation_id
+                .as_deref(),
+            Some("cont-456")
+        );
+        let response =
+            reqwest::Response::from(http::Response::new(reqwest::Body::from(Vec::<u8>::new())))
+                .into();
+        let harvest = harvest_bridge_round(
+            BridgeRoundOutcome::Continued(
+                response,
+                EventStreamDecoder::new(),
+                Some(sample_search_results()),
+            ),
+            &pending.tool_use_id,
+            &mut context,
+        );
+        assert!(!harvest.finished);
+        events.extend(harvest.events);
+        events.extend(context.process_kiro_event(&Event::ReasoningContent(
+            ReasoningContentEvent {
+                text: "续流后\n归纳".into(),
+                signature: "synthetic-second-signature".into(),
+            },
+        )));
+        let answer: AssistantResponseEvent =
+            serde_json::from_value(serde_json::json!({"content":"最终答案"})).unwrap();
+        events.extend(context.process_kiro_event(&Event::AssistantResponse(answer)));
+        events.extend(context.generate_final_events());
+
+        let text: String = events
+            .iter()
+            .filter_map(|event| event.data["delta"]["text"].as_str())
+            .collect();
+        assert!(!text.contains('\u{1b}'));
+        assert_eq!(text.matches("💭 Thinking\n\n").count(), 2);
+        assert_eq!(text.matches("💭 Thought for ").count(), 2);
+        assert!(text.contains("搜索前  \n推理") && text.contains("续流后  \n归纳"));
+        assert!(text.ends_with("最终答案"));
+        let kinds: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.data["content_block"]["type"].as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "text",
+                "server_tool_use",
+                "web_search_tool_result",
+                "text",
+                "text"
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.data["delta"]["type"] != "thinking_delta"
+                    && event.data["delta"]["type"] != "signature_delta")
+        );
+        let mut open = BTreeSet::new();
+        let mut started = BTreeSet::new();
+        for event in &events {
+            match event.event.as_str() {
+                "content_block_start" => {
+                    let index = event.data["index"].as_i64().unwrap();
+                    assert!(started.insert(index) && open.insert(index));
+                }
+                "content_block_delta" => {
+                    assert!(open.contains(&event.data["index"].as_i64().unwrap()))
+                }
+                "content_block_stop" => {
+                    assert!(open.remove(&event.data["index"].as_i64().unwrap()))
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(started.len(), 5);
+        assert!(open.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_stop")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn test_bridge_input_fragments_aggregated() {
         // 分片到达（stop=false）→ Collecting 聚合，不透传也不发块；
         // stop=true → 截获完成，发 server_tool_use + web_search_tool_result 可见性块

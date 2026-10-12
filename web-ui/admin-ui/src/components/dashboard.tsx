@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useState, useEffect, useMemo, useRef } from 'react'
-import {Server, Key, Settings, BarChart2, ScrollText, Boxes} from 'lucide-react'
+import {Server, Key, Settings, BarChart2, ScrollText, Boxes, Globe2} from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -13,6 +13,7 @@ import { ApiKeyDetailPage } from '@/components/api-key-detail-page'
 import { CredentialDetailPage } from '@/components/credential-detail-page'
 import { ThrottleLogPage } from '@/components/throttle-log-page'
 import { FailureLogPage } from '@/components/failure-log-page'
+import { ProxyPanel } from '@/components/proxy-panel'
 import { SettingsPanel } from '@/components/settings-panel'
 import { LogViewerPage } from '@/components/log-viewer-page'
 import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
@@ -46,7 +47,7 @@ interface DashboardProps {
 export function Dashboard({ onLogout }: DashboardProps) {
   const { t } = useTranslation()
   const { theme, toggleTheme } = useTheme()
-  const [activeTab, setActiveTab] = useState<'credentials' | 'apikeys' | 'settings' | 'logs' | 'models' | 'changelog'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'apikeys' | 'settings' | 'logs' | 'models' | 'changelog' | 'proxies'>('credentials')
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readStoredSidebarCollapsed)
   // 侧边栏内容（header/nav/footer 的 flex 方向、间距、文字显隐）无法被 CSS transition 平滑插值，
   // 故延迟到宽度动画半程、内容淡为透明时才瞬切，避免可见的布局跳变
@@ -652,6 +653,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       title: t('dashboard.navSystem'),
       items: [
         { key: 'logs', label: t('dashboard.navLogs'), icon: ScrollText, count: undefined, active: activeTab === 'logs', onClick: () => { setActiveTab('logs'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
+        { key: 'proxies', label: t('proxies.title'), icon: Globe2, count: undefined, active: activeTab === 'proxies', onClick: () => { setActiveTab('proxies'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
         { key: 'settings', label: t('dashboard.navSettings'), icon: Settings, count: undefined, active: activeTab === 'settings', onClick: () => { setActiveTab('settings'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
       ],
     },
@@ -675,9 +677,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
       />
 
       {/* 主内容 */}
-      <main className={`${sidebarCollapsed ? 'ml-16' : 'ml-[232px]'} flex-1 min-h-screen px-9 py-7 transition-all duration-200`}>
+      <main className={`${sidebarCollapsed ? 'ml-16' : 'ml-[232px]'} flex-1 min-w-0 min-h-screen px-4 py-5 sm:px-9 sm:py-7 transition-all duration-200`}>
         {activeTab === 'logs' ? (
           <LogViewerPage />
+        ) : activeTab === 'proxies' ? (
+          <ProxyPanel />
         ) : activeTab === 'settings' ? (
           <SettingsPanel
             theme={theme}

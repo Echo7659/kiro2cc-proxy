@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::model::config::TlsBackend;
 
 /// 代理配置
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     /// 代理地址，支持 http/https/socks5
     pub url: String,
@@ -17,6 +17,39 @@ pub struct ProxyConfig {
     pub username: Option<String>,
     /// 代理认证密码
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyConfig")
+            .field("url", &safe_proxy_address(&self.url))
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// 日志和管理列表只显示协议、主机和端口，禁止泄漏 URL 内嵌认证或查询参数。
+pub fn safe_proxy_address(raw: &str) -> String {
+    if raw.eq_ignore_ascii_case("direct") {
+        return "direct".to_string();
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "[INVALID PROXY ADDRESS]".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "[INVALID PROXY ADDRESS]".to_string();
+    };
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
 }
 
 impl ProxyConfig {
@@ -61,7 +94,8 @@ pub fn build_client(
     }
 
     if let Some(proxy_config) = proxy {
-        let mut proxy = Proxy::all(&proxy_config.url)?;
+        let mut proxy =
+            Proxy::all(&proxy_config.url).map_err(|_| anyhow::anyhow!("代理地址配置无效"))?;
 
         // 设置代理认证
         if let (Some(username), Some(password)) = (&proxy_config.username, &proxy_config.password) {
@@ -69,7 +103,10 @@ pub fn build_client(
         }
 
         builder = builder.proxy(proxy);
-        tracing::debug!("HTTP Client 使用代理: {}", proxy_config.url);
+        tracing::debug!(
+            "HTTP Client 使用代理: {}",
+            safe_proxy_address(&proxy_config.url)
+        );
     }
 
     Ok(builder.build()?)
@@ -78,6 +115,40 @@ pub fn build_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_diagnostics_do_not_expose_authentication_or_url_parameters() {
+        let proxy = ProxyConfig::new(
+            "http://demo-user:demo%7Esecret@proxy.example:10001/private?password=hidden",
+        )
+        .with_auth("separate-user", "separate-password");
+        assert_eq!(safe_proxy_address(&proxy.url), "http://proxy.example:10001");
+        let debug = format!("{proxy:?}");
+        for secret in [
+            "demo-user",
+            "demo%7Esecret",
+            "separate-user",
+            "separate-password",
+            "private",
+            "hidden",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn invalid_proxy_diagnostics_never_echo_the_input() {
+        assert_eq!(
+            safe_proxy_address("malformed password:demo-secret"),
+            "[INVALID PROXY ADDRESS]"
+        );
+        assert_eq!(
+            safe_proxy_address("http://[::1]:12345"),
+            "http://[::1]:12345"
+        );
+        assert_eq!(safe_proxy_address("direct"), "direct");
+    }
 
     #[test]
     fn test_proxy_config_new() {

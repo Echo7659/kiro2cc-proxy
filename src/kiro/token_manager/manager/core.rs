@@ -1,8 +1,6 @@
 //! MultiTokenManager 核心：构造初始化、配置读取、每凭据 RPM 上限等基础能力。
 use super::super::entry::{CredentialEntry, DisabledReason, HealthStatus};
-use super::super::refresh::{
-    RefreshTokenInvalidError, is_token_expired, is_token_expiring_soon, refresh_token,
-};
+use super::super::refresh::{RefreshTokenInvalidError, is_token_expired, is_token_expiring_soon};
 use super::super::types::{
     CallContext, MultiTokenManager, STICKY_CACHE_TTL, STICKY_THROTTLE_EVICT_THRESHOLD,
     StickyCacheEntry, TOKEN_REFRESH_COOLDOWN,
@@ -12,7 +10,8 @@ use crate::http_client::ProxyConfig;
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::model::config::Config;
-use parking_lot::Mutex;
+use crate::model::proxy_pool::ProxyUnavailableError;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -30,11 +29,15 @@ impl MultiTokenManager {
     /// * `is_multiple_format` - 是否为多账号格式（决定回写 JSON 形状：数组 vs 单对象，不再影响是否回写）
     pub fn new(
         config: Config,
-        credentials: Vec<KiroCredentials>,
+        mut credentials: Vec<KiroCredentials>,
         proxy: Option<ProxyConfig>,
         credentials_path: Option<PathBuf>,
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
+        let mut normalized_proxy = false;
+        for credential in &mut credentials {
+            normalized_proxy |= super::proxy_routes::normalize_manual_proxy(credential)?;
+        }
         // 计算当前最大 ID，为没有 ID 的账号分配新 ID
         //
         // 注意：不能只看当前 credentials 列表的最大 ID —— 账号删除后其 ID 会从列表中消失，
@@ -140,6 +143,8 @@ impl MultiTokenManager {
         let manager = Self {
             config,
             proxy,
+            proxy_pool: RwLock::new(None),
+            proxy_pending_bindings: Mutex::new(HashMap::new()),
             entries: Mutex::new(entries),
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
@@ -164,7 +169,7 @@ impl MultiTokenManager {
         manager.save_id_counter_at_least(final_max_id);
 
         // 如果有新分配的 ID、新生成的 machineId 或补全的 profileArn，立即持久化到配置文件
-        if has_new_ids || has_new_machine_ids || has_new_profile_arns {
+        if has_new_ids || has_new_machine_ids || has_new_profile_arns || normalized_proxy {
             if let Err(e) = manager.persist_credentials() {
                 tracing::warn!("补全账号 ID/machineId/profileArn 后持久化失败: {}", e);
             } else {
@@ -237,6 +242,9 @@ impl MultiTokenManager {
 
     /// 排队期间的 Token 轮换、禁用和身份编辑必须让旧请求上下文失效。
     pub(crate) fn context_is_current(&self, context: &CallContext) -> bool {
+        if !self.managed_route_is_healthy(&context.credentials) {
+            return false;
+        }
         self.entries
             .lock()
             .iter()
@@ -259,6 +267,8 @@ impl MultiTokenManager {
         captured: &KiroCredentials,
     ) -> bool {
         Self::has_same_subscription_identity(current, captured)
+            && current.proxy_pool_id == captured.proxy_pool_id
+            && current.proxy_pool_generation == captured.proxy_pool_generation
             && current.provider == captured.provider
             && current.proxy_url == captured.proxy_url
             && current.proxy_username == captured.proxy_username
@@ -393,12 +403,16 @@ impl MultiTokenManager {
     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let mut tried_count = 0;
+        let mut last_proxy_error = None;
         let is_opus = model
             .map(|m| m.to_ascii_lowercase().contains("opus"))
             .unwrap_or(false);
 
         loop {
             if tried_count >= total {
+                if let Some(error) = last_proxy_error {
+                    return Err(error);
+                }
                 anyhow::bail!(
                     "所有账号均无法获取有效 Token（可用: {}/{}）",
                     self.available_count(),
@@ -452,6 +466,12 @@ impl MultiTokenManager {
                     return Ok(ctx);
                 }
                 Err(e) => {
+                    if e.downcast_ref::<ProxyUnavailableError>().is_some() {
+                        last_proxy_error = Some(e);
+                        self.switch_to_next_by_priority();
+                        tried_count += 1;
+                        continue;
+                    }
                     tracing::warn!("账号 #{} Token 刷新失败，尝试下一个账号: {}", id, e);
 
                     if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
@@ -482,9 +502,13 @@ impl MultiTokenManager {
         }
 
         let mut tried_ids: Vec<u64> = Vec::new();
+        let mut last_proxy_error = None;
 
         loop {
             if tried_ids.len() >= allowed_ids.len() {
+                if let Some(error) = last_proxy_error {
+                    return Err(error);
+                }
                 anyhow::bail!("{}", self.describe_unavailable(model, allowed_ids));
             }
 
@@ -507,6 +531,11 @@ impl MultiTokenManager {
             match self.try_ensure_token(id, &credentials).await {
                 Ok(ctx) => return Ok(ctx),
                 Err(e) => {
+                    if e.downcast_ref::<ProxyUnavailableError>().is_some() {
+                        last_proxy_error = Some(e);
+                        tried_ids.push(id);
+                        continue;
+                    }
                     tracing::warn!("绑定账号 #{} Token 刷新失败，尝试下一个: {}", id, e);
 
                     if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
@@ -631,6 +660,9 @@ impl MultiTokenManager {
                     return Ok(ctx);
                 }
                 Err(e) => {
+                    if e.downcast_ref::<ProxyUnavailableError>().is_some() {
+                        return Err(e);
+                    }
                     tracing::warn!(
                         "sticky cache 账号 #{} token 刷新失败，驱逐并重选: {}",
                         id,
@@ -778,10 +810,11 @@ impl MultiTokenManager {
     async fn try_ensure_token(
         &self,
         id: u64,
-        credentials: &KiroCredentials,
+        _credentials: &KiroCredentials,
     ) -> anyhow::Result<CallContext> {
+        let credentials = self.ensure_proxy_route(id).await?;
         // 第一次检查（无锁）：快速判断是否需要刷新
-        let needs_refresh = is_token_expired(credentials) || is_token_expiring_soon(credentials);
+        let needs_refresh = is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
         let creds = if needs_refresh {
             // 获取刷新锁，确保同一时间只有一个刷新操作
@@ -814,10 +847,8 @@ impl MultiTokenManager {
                     current_creds
                 } else {
                     // 确实需要刷新
-                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
                     let refreshed_creds =
-                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
-                            .await?;
+                        self.refresh_with_managed_route(id, &current_creds).await?;
 
                     if is_token_expired(&refreshed_creds) {
                         anyhow::bail!("刷新后的 Token 仍然无效或已过期");

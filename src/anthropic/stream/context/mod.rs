@@ -161,7 +161,7 @@ impl StreamContext {
     }
 
     /// 出站事件统一经此处理：开启文本化时改写 thinking 块，否则原样返回
-    fn render_outbound(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
+    pub(crate) fn render_outbound(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
         match self.thinking_text.as_mut() {
             Some(rewriter) => rewriter.rewrite(events),
             None => events,

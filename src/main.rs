@@ -124,7 +124,10 @@ async fn main() {
     });
 
     if proxy_config.is_some() {
-        tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
+        tracing::info!(
+            "已配置 HTTP 代理: {}",
+            http_client::safe_proxy_address(config.proxy_url.as_ref().unwrap())
+        );
     }
 
     // 创建 MultiTokenManager 和 KiroProvider
@@ -140,6 +143,27 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
+
+    let proxy_data_dir = std::path::Path::new(&config_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let proxy_pool = Arc::new(
+        model::proxy_pool::ProxyPool::load(proxy_data_dir.join("proxies.json"), &config)
+            .unwrap_or_else(|error| {
+                tracing::error!("初始化代理池失败: {}", error);
+                std::process::exit(1);
+            }),
+    );
+    token_manager.attach_proxy_pool(proxy_pool.clone());
+    let proxy_health_pool = proxy_pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            proxy_health_pool.check_due().await;
+        }
+    });
 
     // 只读验活：冷却到期才探测，成功后才重新加入账号池。
     // 每个实例只有一个后台循环，管理器还会防止重复探测和管理员操作竞态。
@@ -284,6 +308,7 @@ async fn main() {
                 .with_throttle_log_store(throttle_log_store.clone());
             let admin_psw_shared = Arc::new(parking_lot::RwLock::new(admin_key.clone()));
             let mut admin_state = admin::AdminState::new(admin_psw_shared, admin_service)
+                .with_proxy_pool(proxy_pool.clone())
                 .with_rpm_tracker(rpm_tracker.clone())
                 .with_config_path(std::path::PathBuf::from(&config_path))
                 .with_geo_resolver(geo_resolver.clone());

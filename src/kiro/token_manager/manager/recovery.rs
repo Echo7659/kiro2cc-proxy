@@ -141,6 +141,10 @@ impl MultiTokenManager {
         };
         let mut recovered = 0;
         for id in due_ids {
+            // 出口更新先于恢复 ticket，合法代理切换不会使本轮只读探测结果失效。
+            if self.ensure_proxy_route(id).await.is_err() {
+                continue;
+            }
             let Some(ticket) = self.claim_recovery_probe(id, clock()) else {
                 continue;
             };

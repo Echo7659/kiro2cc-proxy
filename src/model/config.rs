@@ -174,6 +174,19 @@ pub struct Config {
     #[serde(default = "default_account_recovery_probe_timeout_secs")]
     pub account_recovery_probe_timeout_secs: u64,
 
+    /// 通过每条代理检查 HTTPS 连通性和出口 IP，不携带账号凭据。
+    #[serde(default = "default_proxy_health_check_url")]
+    pub proxy_health_check_url: String,
+    /// 容量等待与实际网络探测分别使用此预算，排队超时不标记故障。
+    #[serde(default = "default_proxy_health_check_timeout_secs")]
+    pub proxy_health_check_timeout_secs: u64,
+    #[serde(default = "default_proxy_health_check_interval_secs")]
+    pub proxy_health_check_interval_secs: u64,
+    #[serde(default = "default_proxy_health_check_concurrency")]
+    pub proxy_health_check_concurrency: usize,
+    #[serde(default = "default_proxy_failure_cooldown_secs")]
+    pub proxy_failure_cooldown_secs: u64,
+
     /// `/v1/models` 动态列表缓存 TTL（秒），默认 3600
     #[serde(default = "default_model_cache_ttl_secs")]
     pub model_cache_ttl_secs: u64,
@@ -268,6 +281,26 @@ fn default_account_recovery_probe_timeout_secs() -> u64 {
     30
 }
 
+fn default_proxy_health_check_url() -> String {
+    "https://checkip.amazonaws.com/".to_string()
+}
+
+fn default_proxy_health_check_timeout_secs() -> u64 {
+    10
+}
+
+fn default_proxy_health_check_interval_secs() -> u64 {
+    300
+}
+
+fn default_proxy_health_check_concurrency() -> usize {
+    4
+}
+
+fn default_proxy_failure_cooldown_secs() -> u64 {
+    60
+}
+
 fn default_system_version() -> String {
     "darwin#24.6.0".to_string()
 }
@@ -320,6 +353,11 @@ impl Default for Config {
             account_recovery_cooldown_secs: default_account_recovery_cooldown_secs(),
             account_recovery_max_cooldown_secs: default_account_recovery_max_cooldown_secs(),
             account_recovery_probe_timeout_secs: default_account_recovery_probe_timeout_secs(),
+            proxy_health_check_url: default_proxy_health_check_url(),
+            proxy_health_check_timeout_secs: default_proxy_health_check_timeout_secs(),
+            proxy_health_check_interval_secs: default_proxy_health_check_interval_secs(),
+            proxy_health_check_concurrency: default_proxy_health_check_concurrency(),
+            proxy_failure_cooldown_secs: default_proxy_failure_cooldown_secs(),
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
             cache_simulation: CacheSimulationConfig::default(),
             client_token_passthrough: false,
@@ -408,6 +446,38 @@ impl Config {
             self.account_recovery_max_cooldown_secs >= self.account_recovery_cooldown_secs,
             "accountRecoveryMaxCooldownSecs must be at least accountRecoveryCooldownSecs"
         );
+        self.validate_proxy_pool()?;
+        Ok(())
+    }
+
+    fn validate_proxy_pool(&self) -> anyhow::Result<()> {
+        let url = reqwest::Url::parse(&self.proxy_health_check_url)
+            .map_err(|_| anyhow::anyhow!("proxyHealthCheckUrl must be a valid HTTPS URL"))?;
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "proxyHealthCheckUrl must use HTTPS without credentials, query or fragment"
+        );
+        anyhow::ensure!(
+            (1..=4).contains(&self.proxy_health_check_concurrency),
+            "proxyHealthCheckConcurrency must be between 1 and 4"
+        );
+        anyhow::ensure!(
+            (1..=10).contains(&self.proxy_health_check_timeout_secs),
+            "proxyHealthCheckTimeoutSecs must be between 1 and 10"
+        );
+        anyhow::ensure!(
+            (30..=604_800).contains(&self.proxy_health_check_interval_secs),
+            "proxyHealthCheckIntervalSecs must be between 30 and 604800"
+        );
+        anyhow::ensure!(
+            (1..=604_800).contains(&self.proxy_failure_cooldown_secs),
+            "proxyFailureCooldownSecs must be between 1 and 604800"
+        );
         Ok(())
     }
 
@@ -434,6 +504,10 @@ impl Config {
     /// - `UPSTREAM_ADMISSION_TIMEOUT_SECS`: 准入等待上限
     /// - `ACCOUNT_RECOVERY_COOLDOWN_SECS` / `ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS`: 验活冷却/退避上限
     /// - `ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS`: 验活超时
+    /// - `PROXY_HEALTH_CHECK_URL`: 无认证的 HTTPS/IP 健康检查目标
+    /// - `PROXY_HEALTH_CHECK_TIMEOUT_SECS`: 容量等待与网络探测各自的超时
+    /// - `PROXY_HEALTH_CHECK_INTERVAL_SECS` / `PROXY_FAILURE_COOLDOWN_SECS`: 正常重检间隔与故障冷却
+    /// - `PROXY_HEALTH_CHECK_CONCURRENCY`: 检测并发上限（最大 4）
     /// - `MODEL_CACHE_TTL_SECS`: /v1/models 动态列表缓存 TTL（秒）
     /// - `CLIENT_TOKEN_PASSTHROUGH`: 客户端 token 直通开关
     /// - `FORWARD_SUGGESTION_MODE`: Suggestion Mode 输入建议请求放行开关
@@ -504,12 +578,32 @@ impl Config {
                 "ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS",
                 &mut self.account_recovery_probe_timeout_secs,
             ),
+            (
+                "PROXY_HEALTH_CHECK_TIMEOUT_SECS",
+                &mut self.proxy_health_check_timeout_secs,
+            ),
+            (
+                "PROXY_HEALTH_CHECK_INTERVAL_SECS",
+                &mut self.proxy_health_check_interval_secs,
+            ),
+            (
+                "PROXY_FAILURE_COOLDOWN_SECS",
+                &mut self.proxy_failure_cooldown_secs,
+            ),
         ] {
             if let Ok(v) = env::var(name)
                 && let Ok(seconds) = v.parse::<u64>()
             {
                 *target = seconds;
             }
+        }
+        if let Ok(url) = env::var("PROXY_HEALTH_CHECK_URL") {
+            self.proxy_health_check_url = url;
+        }
+        if let Ok(value) = env::var("PROXY_HEALTH_CHECK_CONCURRENCY")
+            && let Ok(limit) = value.parse::<usize>()
+        {
+            self.proxy_health_check_concurrency = limit;
         }
         if let Ok(v) = env::var("MODEL_CACHE_TTL_SECS")
             && let Ok(n) = v.parse::<u64>()
@@ -570,6 +664,45 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_health_checks_have_bounded_safe_defaults() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            config.proxy_health_check_url,
+            "https://checkip.amazonaws.com/"
+        );
+        assert_eq!(config.proxy_health_check_timeout_secs, 10);
+        assert_eq!(config.proxy_health_check_interval_secs, 300);
+        assert_eq!(config.proxy_health_check_concurrency, 4);
+        assert_eq!(config.proxy_failure_cooldown_secs, 60);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn proxy_health_checks_reject_unbounded_or_credential_bearing_targets() {
+        for target in [
+            "http://example.invalid/",
+            "https://user:demo@example.invalid/",
+            "https://example.invalid/?token=demo",
+            "https://example.invalid/#fragment",
+            "invalid",
+        ] {
+            let config: Config =
+                serde_json::from_value(serde_json::json!({"proxyHealthCheckUrl":target})).unwrap();
+            assert!(config.validate_account_protection().is_err());
+        }
+        for (field, value) in [
+            ("proxyHealthCheckConcurrency", 0),
+            ("proxyHealthCheckConcurrency", 5),
+            ("proxyHealthCheckTimeoutSecs", 11),
+            ("proxyHealthCheckIntervalSecs", 29),
+            ("proxyFailureCooldownSecs", 0),
+        ] {
+            let config: Config = serde_json::from_value(serde_json::json!({field:value})).unwrap();
+            assert!(config.validate_account_protection().is_err());
+        }
+    }
 
     #[test]
     fn account_protection_defaults_apply_to_existing_configs() {

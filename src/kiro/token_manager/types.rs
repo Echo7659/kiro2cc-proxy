@@ -8,9 +8,12 @@ use std::sync::atomic::AtomicU32;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::model::config::Config;
+use crate::model::proxy_pool::ProxyPool;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -60,6 +63,11 @@ pub struct CredentialEntrySnapshot {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    pub proxy_pool_id: Option<u64>,
+    pub proxy_route_status: Option<String>,
+    pub proxy_mode: String,
+    pub effective_proxy_url: Option<String>,
+    pub proxy_exit_ip: Option<String>,
     /// 健康状态
     pub health_status: HealthStatus,
     /// 被限流次数（429 响应，累计）
@@ -97,6 +105,8 @@ pub struct ManagerSnapshot {
 pub struct MultiTokenManager {
     pub(crate) config: Config,
     pub(crate) proxy: Option<ProxyConfig>,
+    pub(crate) proxy_pool: RwLock<Option<Arc<ProxyPool>>>,
+    pub(crate) proxy_pending_bindings: Mutex<HashMap<u64, usize>>,
     /// 账号条目列表
     pub(crate) entries: Mutex<Vec<CredentialEntry>>,
     /// 当前活动账号 ID

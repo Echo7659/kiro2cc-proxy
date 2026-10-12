@@ -291,6 +291,7 @@ export function EditCredentialDialog({ open, onOpenChange, credential }: EditCre
                   disabled={isPending}
                 />
               </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">{t('credentials.proxyHintEdit')}</p>
             </div>
           </div>
 

@@ -34,6 +34,9 @@ server.env
 /app/config/api_key_usage.json
 /app/config/kiro_*.json
 /app/config/api_key_id_counter.json
+proxies.json
+proxies.json.tmp-*
+proxies.json.*
 /app/config/ip2region_v4.xdb
 
 # Playwright MCP 调试临时文件

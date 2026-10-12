@@ -21,6 +21,9 @@ pub enum AdminServiceError {
 
     /// 账号无效（验证失败）
     InvalidCredential(String),
+
+    /// 托管代理当前不可用；不是账号认证失败。
+    ProxyUnavailable,
 }
 
 impl fmt::Display for AdminServiceError {
@@ -32,6 +35,9 @@ impl fmt::Display for AdminServiceError {
             AdminServiceError::UpstreamError(msg) => write!(f, "上游服务错误: {}", msg),
             AdminServiceError::InternalError(msg) => write!(f, "内部错误: {}", msg),
             AdminServiceError::InvalidCredential(msg) => write!(f, "账号无效: {}", msg),
+            AdminServiceError::ProxyUnavailable => {
+                f.write_str("代理池暂无可用代理，请等待检测完成或补充代理")
+            }
         }
     }
 }
@@ -46,6 +52,7 @@ impl AdminServiceError {
             AdminServiceError::UpstreamError(_) => StatusCode::BAD_GATEWAY,
             AdminServiceError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AdminServiceError::InvalidCredential(_) => StatusCode::BAD_REQUEST,
+            AdminServiceError::ProxyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -60,6 +67,7 @@ impl AdminServiceError {
             AdminServiceError::InvalidCredential(_) => {
                 AdminErrorResponse::invalid_request(self.to_string())
             }
+            AdminServiceError::ProxyUnavailable => AdminErrorResponse::api_error(self.to_string()),
         }
     }
 }

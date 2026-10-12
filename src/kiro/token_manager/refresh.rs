@@ -274,6 +274,13 @@ async fn refresh_social_token(
         .await?;
 
     let status = response.status();
+    if status.as_u16() == 407 {
+        return Err(response
+            .error_for_status_ref()
+            .expect_err("407 is an error")
+            .without_url()
+            .into());
+    }
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         if is_invalid_grant_response(status.as_u16(), &body_text) {
@@ -394,6 +401,13 @@ async fn refresh_idc_token(
         .await?;
 
     let status = response.status();
+    if status.as_u16() == 407 {
+        return Err(response
+            .error_for_status_ref()
+            .expect_err("407 is an error")
+            .without_url()
+            .into());
+    }
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         if is_invalid_grant_response(status.as_u16(), &body_text) {
@@ -485,6 +499,13 @@ async fn refresh_external_idp_token(
         .await?;
 
     let status = response.status();
+    if status.as_u16() == 407 {
+        return Err(response
+            .error_for_status_ref()
+            .expect_err("407 is an error")
+            .without_url()
+            .into());
+    }
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         if is_invalid_grant_response(status.as_u16(), &body_text) {
@@ -663,6 +684,13 @@ async fn send_usage_limits_request(
         .await?;
 
     let status = response.status();
+    if status.as_u16() == 407 {
+        return Err(response
+            .error_for_status_ref()
+            .expect_err("407 is an error")
+            .without_url()
+            .into());
+    }
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         // BuilderId 个人账号不支持 getUsageLimits，AWS 返回 400 "Invalid profileArn"
@@ -762,6 +790,13 @@ pub(crate) async fn list_available_models(
         .await?;
 
     let status = response.status();
+    if status.as_u16() == 407 {
+        return Err(response
+            .error_for_status_ref()
+            .expect_err("407 is an error")
+            .without_url()
+            .into());
+    }
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
         bail!("获取支持模型列表失败: {} {}", status, body_text);
