@@ -256,9 +256,9 @@ pub(crate) mod tests {
             .filter_map(|event| event.data["delta"]["text"].as_str())
             .collect();
         assert!(!text.contains('\u{1b}'));
-        assert_eq!(text.matches("💭 Thinking\n\n").count(), 2);
+        assert_eq!(text.matches("> *💭 Thinking*\n>\n").count(), 2);
         assert_eq!(text.matches("💭 Thought for ").count(), 2);
-        assert!(text.contains("搜索前  \n推理") && text.contains("续流后  \n归纳"));
+        assert!(text.contains("> *搜索前*  \n> *推理*") && text.contains("> *续流后*  \n> *归纳*"));
         assert!(text.ends_with("最终答案"));
         let kinds: Vec<_> = events
             .iter()

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useState, useEffect, useMemo, useRef } from 'react'
-import {Server, Key, Settings, BarChart2, ScrollText, Boxes, Globe2} from 'lucide-react'
+import { Server, Key, Settings, BarChart2, ScrollText, Boxes, Globe2, Palette } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -16,11 +16,15 @@ import { FailureLogPage } from '@/components/failure-log-page'
 import { ProxyPanel } from '@/components/proxy-panel'
 import { SettingsPanel } from '@/components/settings-panel'
 import { LogViewerPage } from '@/components/log-viewer-page'
+import { DocsPage } from '@/components/docs-page'
 import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
 import { useTheme } from '@/hooks/use-theme'
-import { DailyStatsPage } from '@/components/daily-stats-page'
+import type { CustomRange } from '@/components/daily-shared'
+import { DailyStatsPage, type RangeKey } from '@/components/daily-stats-page'
+import { DailySummaryPage, type SummaryRangeKey } from '@/components/daily-summary-page'
 import { ModelListPage } from '@/components/model-list-page'
 import { ChangelogPage } from '@/components/changelog-page'
+import { ThemeSettingsPage } from '@/components/theme-settings-page'
 import { DailyDetailPage } from '@/components/daily-detail-page'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
@@ -47,7 +51,7 @@ interface DashboardProps {
 export function Dashboard({ onLogout }: DashboardProps) {
   const { t } = useTranslation()
   const { theme, toggleTheme } = useTheme()
-  const [activeTab, setActiveTab] = useState<'credentials' | 'apikeys' | 'settings' | 'logs' | 'models' | 'changelog' | 'proxies'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'apikeys' | 'settings' | 'logs' | 'models' | 'changelog' | 'proxies' | 'theme' | 'docs'>('credentials')
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readStoredSidebarCollapsed)
   // 侧边栏内容（header/nav/footer 的 flex 方向、间距、文字显隐）无法被 CSS transition 平滑插值，
   // 故延迟到宽度动画半程、内容淡为透明时才瞬切，避免可见的布局跳变
@@ -73,6 +77,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [dailyView, setDailyView] = useState<string | null>(null)
   const [dailyFromSidebar, setDailyFromSidebar] = useState(false)
+  const [dailyRange, setDailyRange] = useState<RangeKey>('today')
+  const [dailyCustomRange, setDailyCustomRange] = useState<CustomRange | null>(null)
+  // 日明细页的返回目标：从「每日统计」汇总页下钻 → 回汇总页；其余路径 → 回使用日志页
+  const [dailyDetailFromSummary, setDailyDetailFromSummary] = useState(false)
+  // 每日统计汇总页的区间选择：提升持有，下钻日明细返回后保持
+  const [dailySummaryRange, setDailySummaryRange] = useState<SummaryRangeKey>('7')
+  const [dailySummaryCustomRange, setDailySummaryCustomRange] = useState<CustomRange | null>(null)
   const cancelVerifyRef = useRef(false)
   // 单账号重查余额的防重入标记（见 handleRefetchBalance）
   const refetchingBalanceIds = useRef<Set<number>>(new Set())
@@ -164,6 +175,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // credits 是浮点量，分母仅守 > 0 会让极小基线（如 0.001）放大出无意义的百分比；抬到 0.5 起算
   const creditsDeltaPercent = todayCredits !== null && yesterdayStats && yesterdayStats.totalCredits >= CREDITS_DELTA_MIN_BASE
     ? ((todayCredits - yesterdayStats.totalCredits) / yesterdayStats.totalCredits) * 100
+    : null
+  // 今日缓存命中率：口径 = cacheRead / input（后端 input 已含 cache 命中部分）；无记录或 input 为 0 时不展示
+  const todayCacheRatePercent = dailyUsageData && todayStats
+    && Number.isFinite(todayStats.totalInputTokens) && todayStats.totalInputTokens > 0
+    && Number.isFinite(todayStats.totalCacheReadTokens)
+    ? (todayStats.totalCacheReadTokens / todayStats.totalInputTokens) * 100
     : null
   const creditsTrend = recent7.map(d => d.totalCredits)
   // 后端无按天失败数，只能给账号池累计值
@@ -267,11 +284,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
         return next
       })
     }
-  }
-
-  const handleRefresh = () => {
-    refetch()
-    toast.success(t('dashboard.toastRefreshed'))
   }
 
   const handleLogout = () => {
@@ -446,8 +458,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
     deselectAll()
   }
 
-  // 查询所有凭据信息（逐个查询，避免瞬时并发）
+  // 刷新（逐个查询余额，避免瞬时并发）；兼具原独立刷新按钮的职责：
+  // 重拉账号运行时快照（失败计数/健康状态/自动禁用等）
   const handleQueryCurrentPageInfo = async () => {
+    refetch()
+    // 与切 tab 刷新口径对齐：同步失效每日统计（今日消耗积分/请求数/缓存命中率等）
+    queryClient.invalidateQueries({ queryKey: ['dailyUsage'] })
     const allCredentials = data?.credentials || []
 
     if (allCredentials.length === 0) {
@@ -645,7 +661,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       items: [
         { key: 'credentials', label: t('dashboard.navCredentials'), icon: Server, count: data && data.credentials.length > 0 ? data.credentials.length : undefined, active: activeTab === 'credentials' && dailyView === null, onClick: () => { setActiveTab('credentials'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
         { key: 'apikeys', label: 'API Keys', icon: Key, count: apiKeys && apiKeys.length > 0 ? apiKeys.length : undefined, active: activeTab === 'apikeys', onClick: () => { setActiveTab('apikeys'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
-        { key: 'daily', label: t('dashboard.navDailyStats'), icon: BarChart2, count: undefined, active: dailyView !== null, onClick: () => { setActiveTab('credentials'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView('list'); setDailyFromSidebar(true) } },
+        { key: 'daily', label: t('dashboard.navDailyStats'), icon: BarChart2, count: undefined, active: dailyView !== null, onClick: () => { setActiveTab('credentials'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView('list'); setDailyFromSidebar(true); setDailyRange('today'); setDailyCustomRange(null); setDailyDetailFromSummary(false) } },
         { key: 'models', label: t('dashboard.navModels'), icon: Boxes, count: undefined, active: activeTab === 'models', onClick: () => { setActiveTab('models'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
       ],
     },
@@ -654,6 +670,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       items: [
         { key: 'logs', label: t('dashboard.navLogs'), icon: ScrollText, count: undefined, active: activeTab === 'logs', onClick: () => { setActiveTab('logs'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
         { key: 'proxies', label: t('proxies.title'), icon: Globe2, count: undefined, active: activeTab === 'proxies', onClick: () => { setActiveTab('proxies'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
+        { key: 'theme', label: t('dashboard.navTheme'), icon: Palette, count: undefined, active: activeTab === 'theme', onClick: () => { setActiveTab('theme'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
         { key: 'settings', label: t('dashboard.navSettings'), icon: Settings, count: undefined, active: activeTab === 'settings', onClick: () => { setActiveTab('settings'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
       ],
     },
@@ -682,10 +699,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <LogViewerPage />
         ) : activeTab === 'proxies' ? (
           <ProxyPanel />
+        ) : activeTab === 'docs' ? (
+          <DocsPage onBack={() => setActiveTab('credentials')} />
+        ) : activeTab === 'theme' ? (
+          <ThemeSettingsPage />
         ) : activeTab === 'settings' ? (
           <SettingsPanel
-            theme={theme}
-            onToggleTheme={toggleTheme}
+            onOpenThemeSettings={() => {
+              setActiveTab('theme')
+              setDetailKeyId(null)
+              setDetailCredentialId(null)
+              setDailyView(null)
+            }}
             onOpenChangelog={() => {
               setActiveTab('changelog')
               setDetailKeyId(null)
@@ -710,12 +735,31 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <DailyStatsPage
             showBack={!dailyFromSidebar}
             onBack={() => setDailyView(null)}
-            onViewDay={(date) => setDailyView(date)}
+            onOpenSummary={() => setDailyView('summary')}
+            range={dailyRange}
+            onRangeChange={setDailyRange}
+            customRange={dailyCustomRange}
+            onCustomRangeChange={setDailyCustomRange}
+          />
+        ) : dailyView === 'summary' ? (
+          <DailySummaryPage
+            onBack={() => setDailyView('list')}
+            onViewDay={(date) => {
+              setDailyDetailFromSummary(true)
+              setDailyView(date)
+            }}
+            sumRange={dailySummaryRange}
+            onSumRangeChange={setDailySummaryRange}
+            customRange={dailySummaryCustomRange}
+            onCustomRangeChange={setDailySummaryCustomRange}
           />
         ) : dailyView !== null ? (
           <DailyDetailPage
             date={dailyView}
-            onBack={() => setDailyView('list')}
+            onBack={() => {
+              setDailyView(dailyDetailFromSummary ? 'summary' : 'list')
+              setDailyDetailFromSummary(false)
+            }}
           />
         ) : failureLogCredentialId !== null ? (
           <FailureLogPage
@@ -752,17 +796,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
           requestTrend={requestTrend}
           todayCredits={todayCredits}
           todayCreditsSaved={todayCreditsSaved}
+          todayCacheRatePercent={todayCacheRatePercent}
           creditsDeltaPercent={creditsDeltaPercent}
           creditsTrend={creditsTrend}
           cumulativeFailures={cumulativeFailures}
           cumulativeFailureRate={cumulativeFailureRate}
-          onTodayClick={() => { setDailyView('list'); setDailyFromSidebar(false) }}
+          onTodayClick={() => { setDailyView('list'); setDailyFromSidebar(false); setDailyRange('today'); setDailyCustomRange(null); setDailyDetailFromSummary(false) }}
+          onOpenDocs={() => { setActiveTab('docs'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) }}
         />
 
         {/* 凭据列表（自本文件拆出，纯代码搬移） */}
         <CredentialList
           allCredentials={allCredentials}
-          handleRefresh={handleRefresh}
           handleQueryCurrentPageInfo={handleQueryCurrentPageInfo}
           queryingInfo={queryingInfo}
           queryInfoProgress={queryInfoProgress}

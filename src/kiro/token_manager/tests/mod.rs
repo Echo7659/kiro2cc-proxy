@@ -3,6 +3,7 @@
 mod basic;
 mod credentials;
 pub(crate) mod ext_idp;
+mod model_routing;
 mod multi;
 mod recovery;
 mod refresh;

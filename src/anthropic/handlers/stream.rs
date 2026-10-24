@@ -50,7 +50,15 @@ pub(crate) async fn handle_stream_request(
     // 思考文本化的渲染样式（配置开启且客户端支持时为 Some）；是否实际生效还取决于
     // 选中账号后的最终 thinking 状态
     thinking_as_text_allowed: Option<crate::anthropic::stream::ThinkingTextStyle>,
+    // 客户端 User-Agent（随 usage 记录入库）
+    user_agent: Option<String>,
+    // 断点缓存记账（promptCacheAccounting 开启时为 Some）
+    cache_accounting: Option<crate::cache::breakpoint::CacheAccounting>,
 ) -> Response {
+    // 计时起点：发起上游请求之前（与 nonstream.rs 口径一致，对齐 codex2cc 的 TTFT 实现），
+    // 首字/耗时均包含上游建连与故障转移耗时；ctx 计时统一用 std Instant，与 tokio 时间源无关
+    let request_started_at = std::time::Instant::now();
+
     // 调用 Kiro API（支持多账号故障转移）
     let (response, credential_id) = match provider
         .call_api_stream(
@@ -88,10 +96,19 @@ pub(crate) async fn handle_stream_request(
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled)
-        .with_usage_tracking(usage_tracker, api_key_id, Some(credential_id), client_ip)
+        .with_usage_tracking(
+            usage_tracker,
+            api_key_id,
+            Some(credential_id),
+            client_ip,
+            user_agent,
+        )
         .with_prompt_cache_usage(prompt_cache_usage)
         .with_prefix_estimated_tokens(prefix_estimated_tokens)
+        .with_cache_accounting(cache_accounting)
         .with_effort(effort)
+        // 计时起点在 call_api_stream 之前注入（见函数开头注释）
+        .with_request_started_at(request_started_at)
         .with_thinking_as_text(thinking_as_text);
 
     // 生成初始事件
@@ -355,8 +372,21 @@ fn create_sse_stream(
                                             // 普通 tool_use SSE，改为客户端可见性块（D4/D8）
                                             let (consumed, mut bridge_events) =
                                                 bridge_handle_event(&mut ctx, &mut bridge, &event);
+                                            // 首字埋点：按「本帧是否产出客户端可见的 SSE 事件」
+                                            // 判定，而非按事件变体名 —— 桥接截获同样会产出可见性块
+                                            // （bridge.rs build_web_search_visibility_events），
+                                            // 而空 content / thinking 关闭的 ReasoningContent 等
+                                            // 早退分支返回空事件，客户端零输出不应计首字；
+                                            // Metering/ContextUsage 等元信息帧天然产出空事件，
+                                            // keepalive 是 SSE 层合成事件，同样不走此处
+                                            if !bridge_events.is_empty() {
+                                                ctx.mark_first_token();
+                                            }
                                             if !consumed {
                                                 let sse_events = ctx.process_kiro_event(&event);
+                                                if !sse_events.is_empty() {
+                                                    ctx.mark_first_token();
+                                                }
                                                 bridge_events.extend(sse_events);
                                             }
                                             events.extend(bridge_events);

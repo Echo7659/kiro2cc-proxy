@@ -16,6 +16,10 @@ import {
   setClientTokenPassthrough,
   getThinkingAsText,
   setThinkingAsText,
+  getDumpKiroBody,
+  setDumpKiroBody,
+  getDebugLogs,
+  setDebugLogs,
   getRuntimeConfig,
   setRuntimeConfig,
   setLoadBalancingMode,
@@ -31,9 +35,12 @@ import {
   setAuthKeys,
   getKeyUsageRecords,
   getCredentialUsageRecords,
+  getCredentialUsageSummary,
   getCredentialTodaySummary,
+  getCredentialRangeSummary,
   getDailyUsage,
   getDailyUsageRecords,
+  getUsageRecordsByRange,
   getThrottleLogs,
   getFailureLogs,
   getModels,
@@ -205,9 +212,9 @@ export function useSetRuntimeConfig() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: setRuntimeConfig,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['runtimeConfig'] })
-    },
+    // An entered proxy URL may include authentication; do not retain settled mutation variables.
+    gcTime: 0,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['runtimeConfig'] }),
   })
 }
 
@@ -248,6 +255,44 @@ export function useSetThinkingAsText() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['thinkingAsText'] })
     },
+  })
+}
+
+// 获取 Kiro 请求体落盘取证开关
+export function useDumpKiroBody() {
+  return useQuery({
+    queryKey: ['dumpKiroBody'],
+    queryFn: getDumpKiroBody,
+  })
+}
+
+// 设置 Kiro 请求体落盘取证开关
+export function useSetDumpKiroBody() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setDumpKiroBody,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dumpKiroBody'] })
+    },
+  })
+}
+
+// 获取 DEBUG 日志开关
+export function useDebugLogs() {
+  return useQuery({
+    queryKey: ['debugLogs'],
+    queryFn: getDebugLogs,
+  })
+}
+
+// 设置 DEBUG 日志开关
+export function useSetDebugLogs() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setDebugLogs,
+    // 后端先热切换再持久化：持久化失败会返回 500 但运行时已变，所以成败都要重新取真实状态，
+    // 并返回 Promise 让 isPending 覆盖刷新过程
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['debugLogs'] }),
   })
 }
 
@@ -344,12 +389,42 @@ export function useCredentialUsageRecords(id: number, page: number, pageSize = 5
   })
 }
 
-// 查询单账号 CST 今日用量汇总（60s 自动刷新）
-export function useCredentialTodaySummary(id: number) {
+// 查询单账号全部留存记录的用量汇总（60s 自动刷新；enabled=false 时停止请求与轮询）
+export function useCredentialUsageSummary(id: number, enabled = true) {
+  return useQuery({
+    queryKey: ['credentialUsageSummary', id],
+    queryFn: () => getCredentialUsageSummary(id),
+    enabled: enabled && id > 0,
+    refetchInterval: 60000,
+  })
+}
+
+// 查询单账号 CST 今日用量汇总（60s 自动刷新；enabled=false 时停止请求与轮询）
+export function useCredentialTodaySummary(id: number, enabled = true) {
   return useQuery({
     queryKey: ['credentialTodaySummary', id],
     queryFn: () => getCredentialTodaySummary(id),
-    enabled: id > 0,
+    enabled: enabled && id > 0,
+    refetchInterval: 60000,
+  })
+}
+
+// 查询单账号 CST 最近 7 天用量汇总（60s 自动刷新；enabled=false 时停止请求与轮询）
+export function useCredential7DaysSummary(id: number, enabled = true) {
+  return useQuery({
+    queryKey: ['credential7DaysSummary', id],
+    queryFn: () => getCredentialRangeSummary(id, '7days'),
+    enabled: enabled && id > 0,
+    refetchInterval: 60000,
+  })
+}
+
+// 查询单账号 CST 最近 30 天用量汇总（60s 自动刷新；enabled=false 时停止请求与轮询）
+export function useCredential30DaysSummary(id: number, enabled = true) {
+  return useQuery({
+    queryKey: ['credential30DaysSummary', id],
+    queryFn: () => getCredentialRangeSummary(id, '30days'),
+    enabled: enabled && id > 0,
     refetchInterval: 60000,
   })
 }
@@ -472,6 +547,19 @@ export function useDailyUsageRecords(date: string, page: number, pageSize = 50) 
     queryKey: ['dailyUsageRecords', date, page, pageSize],
     queryFn: () => getDailyUsageRecords(date, page, pageSize),
     enabled: !!date,
+  })
+}
+
+export function useUsageRecordsByRange(
+  from: string,
+  to: string,
+  page: number,
+  pageSize = 50
+) {
+  return useQuery({
+    queryKey: ['usageRecordsByRange', from, to, page, pageSize],
+    queryFn: () => getUsageRecordsByRange(from, to, page, pageSize),
+    enabled: !!from && !!to,
   })
 }
 

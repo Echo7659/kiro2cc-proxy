@@ -14,7 +14,7 @@ use crate::kiro::model::requests::conversation::{
 use crate::kiro::model::requests::tool::ToolUseEntry;
 
 use super::cache::{CacheEntry, PREV_H0, evict_oldest_if_full};
-use super::message::process_message_content;
+use super::message::process_message_content_with_tool_filter;
 use super::prompt::{
     is_dynamic_hook_injection, is_token_budget_reminder, normalize_billing_header,
 };
@@ -66,6 +66,7 @@ pub(super) fn build_history(
     // 全部块都被分流（stable 拼接结果为空，含仅剩空文本块）时按"无系统消息"处理，
     // 保留 thinking 前缀 / 引导语注入
     let stable_content = stable_system.join("\n");
+    super::drift_diag::log_diverted(session_id, &dynamic_system);
     let system_present =
         system.is_some() && (dynamic_system.is_empty() || !stable_content.is_empty());
     let dynamic_content = dynamic_system.join("\n\n");
@@ -110,6 +111,7 @@ pub(super) fn build_history(
 
                 if let Some(entry) = map.get_mut(&h0_key) {
                     entry.last_used = Instant::now();
+                    super::drift_diag::observe(session_id, &stable_system, false);
                     tracing::info!(
                         "[exp2] history[0] frozen hash={} len={} session={}",
                         &h0_key[h0_key.len().saturating_sub(16)..],
@@ -118,6 +120,7 @@ pub(super) fn build_history(
                     );
                     entry.value.clone()
                 } else {
+                    super::drift_diag::observe(session_id, &stable_system, true);
                     tracing::info!(
                         "[exp2] history[0] first hash={} len={} session={}",
                         &h0_key[h0_key.len().saturating_sub(16)..],
@@ -220,7 +223,8 @@ pub(super) fn merge_user_messages(
     let mut all_tool_results = Vec::new();
 
     for msg in messages {
-        let (text, images, tool_results) = process_message_content(&msg.content)?;
+        let (text, images, tool_results) =
+            process_message_content_with_tool_filter(&msg.content, all_images.len(), |_| true)?;
         if !text.is_empty() {
             content_parts.push(text);
         }

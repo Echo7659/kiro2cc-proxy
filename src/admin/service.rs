@@ -38,11 +38,13 @@ struct CachedBalance {
 /// 复用 `handlers::available_model_to_model` 完成 `Model` 映射，附加 Admin 专属的费率倍率。
 fn live_model_to_admin_item(
     info: &crate::kiro::model::available_models::AvailableModelInfo,
+    release: &super::model_release::ModelReleaseTracker,
 ) -> super::types::AdminModelItem {
     super::types::AdminModelItem {
         model: crate::anthropic::handlers::available_model_to_model(info),
         rate_multiplier: info.rate_multiplier,
-        released_at: super::model_release::release_date(&info.model_id).map(str::to_string),
+        released_at: release.release_date(&info.model_id),
+        description: info.description.clone(),
     }
 }
 
@@ -51,11 +53,13 @@ fn live_model_to_admin_item(
 /// 纯函数，不涉及网络调用，可直接用 fake `Model` 单测。
 fn fallback_model_to_admin_item(
     model: crate::anthropic::types::Model,
+    release: &super::model_release::ModelReleaseTracker,
 ) -> super::types::AdminModelItem {
     super::types::AdminModelItem {
-        released_at: super::model_release::release_date(&model.id).map(str::to_string),
+        released_at: release.release_date(&model.id),
         model,
         rate_multiplier: None,
+        description: None,
     }
 }
 
@@ -90,6 +94,8 @@ pub struct AdminService {
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
     throttle_log_store: Option<Arc<ThrottleLogStore>>,
+    /// 模型首次出现日期自检（驱动模型页 NEW 徽章）
+    model_release: super::model_release::ModelReleaseTracker,
 }
 
 impl AdminService {
@@ -99,12 +105,18 @@ impl AdminService {
             .map(|d| d.join("kiro_balance_cache.json"));
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
+        let model_release = super::model_release::ModelReleaseTracker::load(
+            token_manager
+                .cache_dir()
+                .map(|d| d.join(super::model_release::SEEN_FILE_NAME)),
+        );
 
         Self {
             token_manager,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             throttle_log_store: None,
+            model_release,
         }
     }
 
@@ -135,6 +147,9 @@ impl AdminService {
                 expires_at: entry.expires_at,
                 auth_method: entry.auth_method,
                 has_profile_arn: entry.has_profile_arn,
+                client_id: entry.client_id,
+                profile_arn: entry.profile_arn,
+                machine_id: entry.machine_id,
                 refresh_token_hash: entry.refresh_token_hash,
                 email: entry.email,
                 nickname: entry.nickname,
@@ -291,12 +306,20 @@ impl AdminService {
     /// 反序列化失败）时记录日志并回退到本地静态模型表（`rate_multiplier` 全为 `None`）。
     pub async fn list_admin_models(&self) -> Vec<super::types::AdminModelItem> {
         let items = match self.token_manager.list_available_models().await {
-            Ok(resp) => resp.models.iter().map(live_model_to_admin_item).collect(),
+            Ok(resp) => {
+                // 仅在上游实时响应成功时登记：首次建立基线，之后新出现的模型记当天日期
+                let ids: Vec<&str> = resp.models.iter().map(|m| m.model_id.as_str()).collect();
+                self.model_release.observe(&ids);
+                resp.models
+                    .iter()
+                    .map(|m| live_model_to_admin_item(m, &self.model_release))
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!("获取实时支持模型列表失败，回退到本地静态模型表: {}", e);
                 crate::anthropic::handlers::build_model_list()
                     .into_iter()
-                    .map(fallback_model_to_admin_item)
+                    .map(|m| fallback_model_to_admin_item(m, &self.model_release))
                     .collect()
             }
         };
@@ -316,7 +339,12 @@ impl AdminService {
             .list_available_models_for(id)
             .await
             .map_err(|e| self.classify_balance_error(e, id))?;
-        let items: Vec<AdminModelItem> = resp.models.iter().map(live_model_to_admin_item).collect();
+        // 单账号视图只查询、不登记：账号间模型集合可能不同，不应据此判定「新增」
+        let items: Vec<AdminModelItem> = resp
+            .models
+            .iter()
+            .map(|m| live_model_to_admin_item(m, &self.model_release))
+            .collect();
         Ok(AdminModelsResponse {
             object: "list".to_string(),
             data: group_models_by_family(items),
@@ -686,6 +714,7 @@ impl AdminService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::model_release::ModelReleaseTracker;
     use crate::admin::types::AdminModelItem;
     use crate::anthropic::types::Model;
     use crate::kiro::model::available_models::{
@@ -705,6 +734,7 @@ mod tests {
         AvailableModelInfo {
             model_id: model_id.to_string(),
             model_name: model_name.to_string(),
+            description: None,
             rate_multiplier: rate,
             token_limits: TokenLimits {
                 max_input_tokens: max_in,
@@ -723,7 +753,7 @@ mod tests {
             1_000_000,
             64_000,
         );
-        let item = live_model_to_admin_item(&info);
+        let item = live_model_to_admin_item(&info, &ModelReleaseTracker::in_memory());
         assert_eq!(item.model.id, "claude-sonnet-4.6");
         assert_eq!(item.model.display_name, "Claude Sonnet 4.6");
         assert_eq!(item.model.max_tokens, 64_000);
@@ -731,9 +761,23 @@ mod tests {
         assert_eq!(item.rate_multiplier, Some(1.3));
 
         let unknown = fake_info("foo-model", "Foo Model", None, 100, 50);
-        let unknown_item = live_model_to_admin_item(&unknown);
+        let unknown_item = live_model_to_admin_item(&unknown, &ModelReleaseTracker::in_memory());
         assert_eq!(unknown_item.model.owned_by, "unknown");
         assert_eq!(unknown_item.rate_multiplier, None);
+    }
+
+    #[test]
+    fn test_live_model_to_admin_item_carries_description() {
+        let mut info = fake_info(
+            "claude-opus-5",
+            "claude-opus-5",
+            Some(2.2),
+            1_000_000,
+            128_000,
+        );
+        info.description = Some("Claude Opus 5 model".to_string());
+        let item = live_model_to_admin_item(&info, &ModelReleaseTracker::in_memory());
+        assert_eq!(item.description.as_deref(), Some("Claude Opus 5 model"));
     }
 
     #[test]
@@ -748,9 +792,10 @@ mod tests {
             max_tokens: 8192,
         };
         let expected_id = model.id.clone();
-        let item = fallback_model_to_admin_item(model);
+        let item = fallback_model_to_admin_item(model, &ModelReleaseTracker::in_memory());
         assert_eq!(item.model.id, expected_id);
         assert_eq!(item.rate_multiplier, None);
+        assert_eq!(item.description, None);
     }
 
     #[test]
@@ -828,6 +873,7 @@ mod tests {
                 },
                 rate_multiplier: None,
                 released_at: None,
+                description: None,
             }
         }
 
@@ -974,6 +1020,10 @@ mod tests {
             .expect("claude-opus-5 抓包条目缺失");
         assert_eq!(opus5.model_name, "claude-opus-5");
         assert_eq!(opus5.rate_multiplier, Some(2.2));
+        assert_eq!(
+            opus5.description.as_deref(),
+            Some("Experimental preview of Claude Opus 5 model with 1M context window")
+        );
         assert_eq!(opus5.token_limits.max_input_tokens, 1_000_000);
         assert_eq!(opus5.token_limits.max_output_tokens, 128_000);
         assert!(opus5.additional_model_request_fields_schema.is_some());

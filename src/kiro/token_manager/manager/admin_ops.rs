@@ -76,6 +76,33 @@ impl MultiTokenManager {
         list_available_models(&credentials, &self.config, &token, effective_proxy.as_ref()).await
     }
 
+    /// 自动路由探测只允许可调度账号；管理员查询仍可显式检查禁用账号。
+    pub(super) async fn list_available_models_for_routing(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<AvailableModelsResponse> {
+        anyhow::ensure!(self.credential_is_available(id), "账号不可用于自动模型探测");
+        let (credentials, token) = self.acquire_token_for_id(id).await?;
+        let context = super::super::types::CallContext {
+            id,
+            credentials,
+            token,
+        };
+        // 刷新/代理检查可能排队：发送前再次检查禁用、Token、出口和身份。
+        anyhow::ensure!(
+            self.context_is_current(&context),
+            "模型探测期间账号或代理身份已变更"
+        );
+        let effective_proxy = context.credentials.effective_proxy(self.proxy.as_ref());
+        list_available_models(
+            &context.credentials,
+            &self.config,
+            &context.token,
+            effective_proxy.as_ref(),
+        )
+        .await
+    }
+
     // ========================================================================
     // Admin API 方法
     // ========================================================================
@@ -103,6 +130,9 @@ impl MultiTokenManager {
                             .as_deref()
                             .map(|m| canonicalize_auth_method_value(m).to_string()),
                         has_profile_arn: e.credentials.profile_arn.is_some(),
+                        client_id: e.credentials.client_id.clone(),
+                        profile_arn: e.credentials.profile_arn.clone(),
+                        machine_id: e.credentials.machine_id.clone(),
                         expires_at: e.credentials.expires_at.clone(),
                         refresh_token_hash: e.credentials.refresh_token.as_deref().map(sha256_hex),
                         email: e.credentials.email.clone(),
@@ -943,6 +973,9 @@ impl MultiTokenManager {
             }
         }
 
+        // 账号配置（如 profileArn、refreshToken）可能改变其模型权限，旧探测结果作废
+        self.invalidate_model_support(id);
+
         self.persist_credentials()?;
         self.save_stats();
         tracing::info!("成功更新账号 #{}", id);
@@ -1114,6 +1147,8 @@ impl MultiTokenManager {
                     .unwrap_or(0);
             }
         }
+
+        self.invalidate_model_support(id);
 
         // 持久化更改
         self.persist_credentials()?;

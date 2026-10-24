@@ -39,6 +39,15 @@ pub struct CredentialStatusItem {
     pub auth_method: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// OIDC Client ID（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Profile ARN（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    /// 账号级 Machine ID（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     /// refreshToken 的 SHA-256 哈希（用于前端重复检测）
     pub refresh_token_hash: Option<String>,
     /// 用户邮箱（用于前端显示）
@@ -189,6 +198,9 @@ mod tests {
             expires_at: None,
             auth_method: Some("social".to_string()),
             has_profile_arn: true,
+            client_id: None,
+            profile_arn: None,
+            machine_id: None,
             refresh_token_hash: None,
             email: None,
             nickname: None,
@@ -228,6 +240,26 @@ mod tests {
         assert_eq!(json["apiRegion"], "us-west-2");
     }
 
+    /// Client ID / Profile ARN / Machine ID（均非机密）需随状态列表下发，
+    /// 编辑弹窗「有值即锁定」只读展示依赖这三个字段
+    #[test]
+    fn credential_status_item_serializes_idc_fields_for_edit_lock() {
+        let mut item = sample_status_item();
+        item.client_id = Some("client-id".to_string());
+        item.profile_arn = Some("arn:aws:codewhisperer:us-east-1:123:profile/abc".to_string());
+        item.machine_id = Some("0a1b2c3d".repeat(8));
+
+        let json = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(json["clientId"], "client-id");
+        assert!(
+            json["profileArn"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("arn:aws:"))
+        );
+        assert_eq!(json["machineId"], "0a1b2c3d".repeat(8));
+    }
+
     /// 未配置时省略字段而非输出 null，保持与结构体既有可选字段一致的下发形状
     #[test]
     fn credential_status_item_omits_empty_provider_and_regions() {
@@ -236,6 +268,9 @@ mod tests {
         assert!(json.get("provider").is_none());
         assert!(json.get("authRegion").is_none());
         assert!(json.get("apiRegion").is_none());
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("profileArn").is_none());
+        assert!(json.get("machineId").is_none());
     }
 
     #[test]
@@ -407,6 +442,38 @@ pub struct SetThinkingAsTextRequest {
     pub enabled: bool,
 }
 
+/// Kiro 请求体落盘取证开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpKiroBodyResponse {
+    /// 是否把发往 Kiro 的请求体落盘到 app/config/kiro-body-dump/
+    pub enabled: bool,
+}
+
+/// 设置 Kiro 请求体落盘取证开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDumpKiroBodyRequest {
+    /// 是否把发往 Kiro 的请求体落盘到 app/config/kiro-body-dump/
+    pub enabled: bool,
+}
+
+/// DEBUG 日志开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugLogsResponse {
+    /// 是否输出 DEBUG 级别日志（控制台 / 日志文件 / Admin 日志页三处一致）
+    pub enabled: bool,
+}
+
+/// 设置 DEBUG 日志开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDebugLogsRequest {
+    /// 是否输出 DEBUG 级别日志
+    pub enabled: bool,
+}
+
 /// 运行时配置（maxRpm / port / proxyUrl / writeChunkingMaxLines）查询响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -415,7 +482,7 @@ pub struct RuntimeConfigResponse {
     pub max_rpm_per_credential: u32,
     /// 监听端口（config.json 持久化值，重启后生效）
     pub port: u16,
-    /// 上游代理地址（config.json 持久化值，重启后生效；空表示未配置）
+    /// 上游代理安全地址（不含认证或查询参数；空表示未配置）
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（运行时当前值，0 = 不追加约束，热生效）
     pub write_chunking_max_lines: u32,
@@ -429,7 +496,7 @@ pub struct SetRuntimeConfigRequest {
     pub max_rpm_per_credential: Option<u32>,
     /// 监听端口（1–65535，重启后生效）
     pub port: Option<u16>,
-    /// 上游代理地址（空串/None = 清除；支持 http/https/socks5，重启后生效）
+    /// 上游代理地址（空串清除，None 保持；与安全显示地址相同则保留原认证）
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（0 = 不追加约束，热生效，仅影响之后的新请求）
     pub write_chunking_max_lines: Option<u32>,
@@ -611,6 +678,8 @@ pub struct AdminModelItem {
     pub rate_multiplier: Option<f64>,
     /// 模型发布日期（`YYYY-MM-DD`）；未登记为 None，前端据此实时计算「最近新增」标记
     pub released_at: Option<String>,
+    /// 官方模型描述；上游未返回或回退静态表时为 None
+    pub description: Option<String>,
 }
 
 /// 支持模型列表响应

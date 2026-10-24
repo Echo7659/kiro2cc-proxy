@@ -2,7 +2,7 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
-import { History, Info, Monitor, Moon, Pencil, Server, ShieldCheck, Sun, type LucideIcon } from 'lucide-react'
+import { Bug, History, Info, Monitor, Pencil, Palette, Server, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PageHead } from '@/components/page-head'
@@ -11,20 +11,21 @@ import {
   useSuggestionMode, useSetSuggestionMode,
   useClientTokenPassthrough, useSetClientTokenPassthrough,
   useThinkingAsText, useSetThinkingAsText,
+  useDumpKiroBody, useSetDumpKiroBody,
+  useDebugLogs, useSetDebugLogs,
   useRuntimeConfig, useSetRuntimeConfig,
   useAuthKeys, useSetAuthKeys,
 } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { LANG_STORAGE_KEY } from '@/i18n'
-import type { Theme } from '@/hooks/use-theme'
 
 /** 分区标题（设计稿 .set-cap） */
 const SET_CAP =
   'flex items-center gap-1.5 px-0.5 pb-2 text-[10.5px] font-semibold uppercase tracking-[.08em] text-ink-3'
 /** 分区卡片（设计稿 .set-card） */
-const SET_CARD = 'overflow-hidden rounded-lg border border-hairline bg-surface shadow-hair'
+const SET_CARD = 'overflow-hidden rounded-lg border border-transparent bg-surface shadow-hair'
 /** 配置行（设计稿 .set-row） */
-const SET_ROW = 'flex items-center gap-4 border-b border-hairline px-4 py-[13px] last:border-b-0'
+const SET_ROW = 'flex items-center gap-4 border-b-[0.5px] border-hairline px-4 py-[13px] last:border-b-0'
 /** 行键名（设计稿 .set-k） */
 const SET_K = 'flex items-center gap-[7px] text-[12.5px] font-semibold'
 /** 行说明（设计稿 .set-d） */
@@ -33,7 +34,7 @@ const SET_D = 'mt-0.5 max-w-[760px] text-[11px] leading-[1.5] text-ink-3'
 const SET_C = 'ml-auto flex flex-none items-center gap-2'
 /** 只读值框（设计稿 .field.w-s） */
 const FIELD_S =
-  'flex h-[31px] min-w-[96px] items-center rounded-[7px] border border-hairline-2 bg-surface-2 px-2.5 font-mono text-[12px] text-ink-2'
+  'flex h-[31px] min-w-[96px] items-center rounded-[7px] border border-transparent bg-surface-2 px-2.5 font-mono text-[12px] text-ink-2'
 /** 分段器容器（设计稿 .seg，8px 圆角与 borderRadius.lg 的 11px 不同，故用字面量） */
 const SEG = 'flex flex-none gap-0.5 rounded-[8px] bg-surface-3 p-0.5'
 /** 分段器档位（设计稿 .seg button） */
@@ -166,33 +167,33 @@ function Sw({ label, on, onToggle, disabled }: { label: string; on: boolean; onT
 }
 
 interface SettingsPanelProps {
-  /** 主题由 Dashboard 持有：useTheme() 每实例独立 state，
-   *  本页自行调用会与侧栏页脚按钮各持一份而无法同步 */
-  theme: Theme
-  onToggleTheme: (x?: number, y?: number) => void
+  onOpenThemeSettings: () => void
   onOpenChangelog: () => void
 }
 
 export function SettingsPanel({
-  theme,
-  onToggleTheme,
+  onOpenThemeSettings,
   onOpenChangelog,
 }: SettingsPanelProps) {
   const { t, i18n } = useTranslation()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
-  const { data: suggestionModeData, isLoading: isLoadingSuggestionMode } = useSuggestionMode()
+  const { data: suggestionModeData, isError: suggestionModeError, isLoading: isLoadingSuggestionMode } = useSuggestionMode()
   const { mutate: setSuggestionMode, isPending: isSettingSuggestionMode } = useSetSuggestionMode()
-  const { data: tokenPassthroughData, isLoading: isLoadingTokenPassthrough } = useClientTokenPassthrough()
+  const { data: tokenPassthroughData, isError: tokenPassthroughError, isLoading: isLoadingTokenPassthrough } = useClientTokenPassthrough()
   const { mutate: setTokenPassthrough, isPending: isSettingTokenPassthrough } = useSetClientTokenPassthrough()
-  const { data: thinkingAsTextData, isLoading: isLoadingThinkingAsText } = useThinkingAsText()
+  const { data: thinkingAsTextData, isError: thinkingAsTextError, isLoading: isLoadingThinkingAsText } = useThinkingAsText()
   const { mutate: setThinkingAsText, isPending: isSettingThinkingAsText } = useSetThinkingAsText()
+  const { data: dumpKiroBodyData, isError: dumpKiroBodyError, isLoading: isLoadingDumpKiroBody } = useDumpKiroBody()
+  const { mutate: setDumpKiroBody, isPending: isSettingDumpKiroBody } = useSetDumpKiroBody()
+  const { data: debugLogsData, isError: debugLogsError, isLoading: isLoadingDebugLogs } = useDebugLogs()
+  const { mutate: setDebugLogsMut, isPending: isSettingDebugLogs } = useSetDebugLogs()
   const { data: authKeysData, isLoading: isLoadingAuthKeys } = useAuthKeys()
   const { mutate: setAuthKeysMut, isPending: isSettingAuthKeys } = useSetAuthKeys()
   const [adminPswDraft, setAdminPswDraft] = useState('')
   const [editingAdminPsw, setEditingAdminPsw] = useState(false)
   const { data: runtimeConfigData, isError: isRuntimeConfigError, isLoading: isLoadingRuntimeConfig } = useRuntimeConfig()
-  const { mutate: setRuntimeConfigMut, isPending: isSettingRuntimeConfig } = useSetRuntimeConfig()
+  const { mutate: setRuntimeConfigMut, isPending: isSettingRuntimeConfig, reset: resetRuntimeConfigMut } = useSetRuntimeConfig()
   const [runtimeDraft, setRuntimeDraft] = useState<{ maxRpm: string; chunkLines: string; port: string; proxyUrl: string }>({
     maxRpm: '',
     chunkLines: '',
@@ -234,6 +235,12 @@ export function SettingsPanel({
     )
   }
 
+  function closeRuntimeEditor(): void {
+    setEditingRuntime(null)
+    setRuntimeDraft({ maxRpm: '', chunkLines: '', port: '', proxyUrl: '' })
+    resetRuntimeConfigMut()
+  }
+
   const saveRuntimeField = (field: 'maxRpm' | 'chunkLines' | 'port' | 'proxyUrl') => {
     const payload: {
       maxRpmPerCredential?: number
@@ -249,23 +256,22 @@ export function SettingsPanel({
     setRuntimeConfigMut(payload, {
       onSuccess: (d) => {
         toast.success(d.message)
-        setEditingRuntime(null)
+        closeRuntimeEditor()
       },
       onError: (e) => toast.error(extractErrorMessage(e)),
+      onSettled: () => resetRuntimeConfigMut(),
     })
   }
 
   const startEditRuntime = (field: 'maxRpm' | 'chunkLines' | 'port' | 'proxyUrl') => {
-    if (field === 'maxRpm') setRuntimeDraft((d) => ({ ...d, maxRpm: String(runtimeConfigData?.maxRpmPerCredential ?? '') }))
-    else if (field === 'chunkLines') setRuntimeDraft((d) => ({ ...d, chunkLines: String(runtimeConfigData?.writeChunkingMaxLines ?? '') }))
-    else if (field === 'port') setRuntimeDraft((d) => ({ ...d, port: String(runtimeConfigData?.port ?? '') }))
-    else setRuntimeDraft((d) => ({ ...d, proxyUrl: runtimeConfigData?.proxyUrl ?? '' }))
+    resetRuntimeConfigMut()
+    setRuntimeDraft({
+      maxRpm: field === 'maxRpm' ? String(runtimeConfigData?.maxRpmPerCredential ?? '') : '',
+      chunkLines: field === 'chunkLines' ? String(runtimeConfigData?.writeChunkingMaxLines ?? '') : '',
+      port: field === 'port' ? String(runtimeConfigData?.port ?? '') : '',
+      proxyUrl: field === 'proxyUrl' ? runtimeConfigData?.proxyUrl ?? '' : '',
+    })
     setEditingRuntime(field)
-  }
-
-  const cancelEditRuntime = () => {
-    setEditingRuntime(null)
-    setRuntimeDraft({ maxRpm: '', chunkLines: '', port: '', proxyUrl: '' })
   }
 
   const runtimeCanSave = (field: 'maxRpm' | 'chunkLines' | 'port' | 'proxyUrl') => {
@@ -313,7 +319,7 @@ export function SettingsPanel({
       <Button size="sm" disabled={!canSave || isSettingRuntimeConfig} onClick={() => saveRuntimeField(field)}>
         {t('common.save')}
       </Button>
-      <Button variant="ghost" size="sm" disabled={isSettingRuntimeConfig} onClick={cancelEditRuntime}>
+      <Button variant="ghost" size="sm" disabled={isSettingRuntimeConfig} onClick={closeRuntimeEditor}>
         {t('common.cancel')}
       </Button>
     </>
@@ -341,11 +347,11 @@ export function SettingsPanel({
               disabled={isLoadingMode || isSettingMode}
             />
           </Row>
-          <Row label={t('settings.suggestionMode')} desc={t('settings.suggestionModeDesc')}>
+          <Row label={t('settings.suggestionMode')} desc={suggestionModeError ? t('common.loadFailed') : t('settings.suggestionModeDesc')}>
             <Sw
               label={t('settings.suggestionMode')}
               on={!!suggestionModeData?.enabled}
-              disabled={isLoadingSuggestionMode || isSettingSuggestionMode}
+              disabled={suggestionModeError || isLoadingSuggestionMode || isSettingSuggestionMode}
               onToggle={() =>
                 setSuggestionMode(!suggestionModeData?.enabled, {
                   onSuccess: (d) => toast.success(d.message),
@@ -354,11 +360,11 @@ export function SettingsPanel({
               }
             />
           </Row>
-          <Row label={t('settings.clientTokenPassthrough')} desc={t('settings.clientTokenPassthroughDesc')}>
+          <Row label={t('settings.clientTokenPassthrough')} desc={tokenPassthroughError ? t('common.loadFailed') : t('settings.clientTokenPassthroughDesc')}>
             <Sw
               label={t('settings.clientTokenPassthrough')}
               on={!!tokenPassthroughData?.enabled}
-              disabled={isLoadingTokenPassthrough || isSettingTokenPassthrough}
+              disabled={tokenPassthroughError || isLoadingTokenPassthrough || isSettingTokenPassthrough}
               onToggle={() =>
                 setTokenPassthrough(!tokenPassthroughData?.enabled, {
                   onSuccess: (d) => toast.success(d.message),
@@ -367,11 +373,11 @@ export function SettingsPanel({
               }
             />
           </Row>
-          <Row label={t('settings.thinkingAsText')} desc={t('settings.thinkingAsTextDesc')}>
+          <Row label={t('settings.thinkingAsText')} desc={thinkingAsTextError ? t('common.loadFailed') : t('settings.thinkingAsTextDesc')}>
             <Sw
               label={t('settings.thinkingAsText')}
               on={!!thinkingAsTextData?.enabled}
-              disabled={isLoadingThinkingAsText || isSettingThinkingAsText}
+              disabled={thinkingAsTextError || isLoadingThinkingAsText || isSettingThinkingAsText}
               onToggle={() =>
                 setThinkingAsText(!thinkingAsTextData?.enabled, {
                   onSuccess: (d) => toast.success(d.message),
@@ -522,14 +528,38 @@ export function SettingsPanel({
             />
           </Row>
           <Row label={t('settings.theme')} desc={t('settings.themeDesc')}>
-            <Seg
-              groupLabel={t('settings.theme')}
-              value={theme}
-              options={[
-                { value: 'light' as const, label: t('settings.themeLight'), icon: Sun },
-                { value: 'dark' as const, label: t('settings.themeDark'), icon: Moon },
-              ]}
-              onSelect={() => onToggleTheme()}
+            <Button type="button" variant="ghost" onClick={onOpenThemeSettings}>
+              <Palette aria-hidden="true" />
+              {t('dashboard.navTheme')}
+            </Button>
+          </Row>
+        </Section>
+
+        <Section icon={Bug} title={t('settings.capDebug')}>
+          <Row label={t('settings.dumpKiroBody')} desc={dumpKiroBodyError ? t('common.loadFailed') : t('settings.dumpKiroBodyDesc')}>
+            <Sw
+              label={t('settings.dumpKiroBody')}
+              on={!!dumpKiroBodyData?.enabled}
+              disabled={dumpKiroBodyError || isLoadingDumpKiroBody || isSettingDumpKiroBody}
+              onToggle={() =>
+                setDumpKiroBody(!dumpKiroBodyData?.enabled, {
+                  onSuccess: (d) => toast.success(d.message),
+                  onError: (e) => toast.error(extractErrorMessage(e)),
+                })
+              }
+            />
+          </Row>
+          <Row label={t('settings.debugLogs')} desc={debugLogsError ? t('common.loadFailed') : t('settings.debugLogsDesc')}>
+            <Sw
+              label={t('settings.debugLogs')}
+              on={!!debugLogsData?.enabled}
+              disabled={debugLogsError || isLoadingDebugLogs || isSettingDebugLogs}
+              onToggle={() =>
+                setDebugLogsMut(!debugLogsData?.enabled, {
+                  onSuccess: (d) => toast.success(d.message),
+                  onError: (e) => toast.error(extractErrorMessage(e)),
+                })
+              }
             />
           </Row>
         </Section>

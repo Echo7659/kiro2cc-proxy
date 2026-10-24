@@ -12,7 +12,7 @@ use crate::model::proxy_pool::ProxyPool;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration as StdDuration, Instant};
@@ -35,6 +35,15 @@ pub struct CredentialEntrySnapshot {
     pub auth_method: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// OIDC Client ID（IdC / external_idp 账号；非机密，编辑弹窗只读展示用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Profile ARN（非机密，编辑弹窗只读展示用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    /// 账号级 Machine ID（非机密，编辑弹窗只读展示用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     /// Token 过期时间
     pub expires_at: Option<String>,
     /// refreshToken 的 SHA-256 哈希（用于前端重复检测）
@@ -143,7 +152,38 @@ pub struct MultiTokenManager {
     /// 每账号 RPM 上限（运行时可经 Admin API 热切换；0 = 不限）。
     /// 独立于 config 持久化值，避免为热切换引入 Config 内部可变性
     pub(crate) max_rpm_per_credential: AtomicU32,
+    /// 每账号实际可用模型缓存（账号 ID → 上游 ListAvailableModels 结果），
+    /// 用于按模型路由；仅在内存中，重启后按需重新探测。
+    /// 锁序：可在持有 `entries` 时获取，但它是叶子锁，持有期间不得再获取其它锁
+    pub(crate) model_support: Mutex<HashMap<u64, ModelSupport>>,
+    /// 串行化模型可用性探测，避免并发请求对同一批账号重复探测
+    pub(crate) model_support_refresh_lock: TokioMutex<()>,
 }
+
+/// 单个账号的模型可用性探测结果
+pub(crate) struct ModelSupport {
+    /// 小写模型 ID 集合；`None` 表示探测失败或返回空列表（视为未知，不据此排除账号）
+    pub(crate) models: Option<HashSet<String>>,
+    /// 探测时间
+    pub(crate) checked_at: Instant,
+}
+
+impl ModelSupport {
+    /// 探测结果是否仍在有效期内（成功结果长期有效，失败结果很快重试）
+    pub(crate) fn is_fresh(&self) -> bool {
+        let ttl = if self.models.is_some() {
+            MODEL_SUPPORT_TTL
+        } else {
+            MODEL_SUPPORT_FAILURE_TTL
+        };
+        self.checked_at.elapsed() < ttl
+    }
+}
+
+/// 模型可用性探测结果的有效期（账号模型权限极少变化）
+pub(crate) const MODEL_SUPPORT_TTL: StdDuration = StdDuration::from_secs(30 * 60);
+/// 探测失败后的重试间隔（避免上游异常时每个请求都重复探测）
+pub(crate) const MODEL_SUPPORT_FAILURE_TTL: StdDuration = StdDuration::from_secs(2 * 60);
 
 /// 每个账号最大 API 调用失败次数
 pub(crate) const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;

@@ -10,6 +10,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod log_capture;
+mod logging;
 mod model;
 mod openai;
 pub mod token;
@@ -36,43 +37,100 @@ async fn main() {
     // 解析命令行参数
     let args = Args::parse();
 
-    // 初始化日志捕获器（在 tracing 初始化之前创建）
-    let log_capture = std::sync::Arc::new(log_capture::LogCapture::new(LOG_CAPTURE_CAPACITY));
-
-    // 初始化日志（registry 风格，同时输出到控制台和 LogCapture）
-    {
-        use tracing_subscriber::prelude::*;
-        let make_filter = || {
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-        };
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_filter(make_filter()))
-            .with(log_capture.as_layer().with_filter(make_filter()))
-            .init();
-    }
-
-    // 加载配置
+    // 加载配置（须先于 tracing 初始化：log_file 日志层需要按配置决定是否挂载；
+    // 此时尚无日志设施，加载失败用 eprintln! 输出后退出）
     let config_path = args
         .config
         .unwrap_or_else(|| Config::default_config_path().to_string());
-    let config = Config::load(&config_path).unwrap_or_else(|e| {
-        tracing::error!("加载配置失败: {}", e);
+    let mut config = Config::load(&config_path).unwrap_or_else(|e| {
+        eprintln!("加载配置失败: {}", e);
         std::process::exit(1);
     });
 
     // 环境变量覆盖配置（用于容器化部署）
-    let mut config = config;
     config.apply_env_overrides();
     config.validate_account_protection().unwrap_or_else(|e| {
-        tracing::error!("账号保护配置无效: {}", e);
+        eprintln!("账号保护配置无效: {}", e);
         std::process::exit(1);
     });
 
+    // 初始化日志捕获器（在 tracing 初始化之前创建）
+    let log_capture = std::sync::Arc::new(log_capture::LogCapture::new(LOG_CAPTURE_CAPACITY));
+
+    // 初始化日志（registry 风格，同时输出到控制台、LogCapture 与可选的日志文件）
+    {
+        use tracing_subscriber::prelude::*;
+        // 单一全局可重载过滤器：控制台 / 日志文件 / LogCapture 三处共用同一档位，
+        // 运行时通过 logging::set_debug_enabled 热切换（reload 内部会重建 callsite
+        // interest 缓存，切换即时生效）
+        let (log_filter, log_filter_handle) = logging::new_reload_layer(config.debug_logs);
+        logging::install(log_filter_handle);
+        // log_file 配置时以 append 模式同步写文件；父目录不存在则自动创建；
+        // 打开失败仅告警降级（只输出控制台），不影响启动
+        let mut file_layer = None;
+        if let Some(path) = config.log_file.as_ref() {
+            let path = std::path::Path::new(path);
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                eprintln!(
+                    "创建日志目录 {} 失败（{}），日志仅输出控制台",
+                    parent.display(),
+                    e
+                );
+            } else {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    Ok(file) => {
+                        file_layer = Some(
+                            tracing_subscriber::fmt::layer().with_writer(std::sync::Arc::new(file)),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "打开日志文件 {} 失败（{}），日志仅输出控制台",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        let registry = tracing_subscriber::registry()
+            .with(log_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(log_capture.as_layer());
+        let log_file_enabled = file_layer.is_some();
+        if let Some(layer) = file_layer {
+            registry.with(layer).init();
+        } else {
+            registry.init();
+        }
+        // init 之后才能正常输出（subscriber 未设置前 tracing 宏会静默丢弃事件）
+        if log_file_enabled {
+            tracing::info!(
+                "日志文件已启用: {}（append 模式）",
+                config.log_file.as_ref().unwrap()
+            );
+        }
+    }
+
     // 客户端 token 直通开关（true 时 usage 字段 1:1 上报，见 Issue #44）
     anthropic::set_client_token_passthrough(config.client_token_passthrough);
+    anthropic::set_output_tokens_include_thinking(config.output_tokens_include_thinking);
+    anthropic::set_models_official_aliases(config.models_official_aliases);
     anthropic::set_thinking_as_text(config.thinking_as_text);
     anthropic::set_write_chunking_max_lines(config.write_chunking_max_lines);
+    anthropic::set_kiro_body_dump_enabled(config.dump_kiro_body);
+    if config.dump_kiro_body {
+        tracing::warn!(
+            "已开启 Kiro 请求体落盘取证（dumpKiroBody=true）：每个请求体将写入 app/config/kiro-body-dump/，定位问题后请关闭"
+        );
+    }
     if config.write_chunking_max_lines == 0 {
         tracing::info!(
             "分块写入约束已关闭（writeChunkingMaxLines=0）：大块工具参数可能触发上游约 240s 重置"
@@ -91,6 +149,11 @@ async fn main() {
     if config.client_token_passthrough {
         tracing::info!(
             "已启用客户端 token 直通（clientTokenPassthrough），usage 字段将 1:1 上报真实值"
+        );
+    }
+    if config.debug_logs {
+        tracing::info!(
+            "DEBUG 日志已开启（debugLogs=true）：控制台、日志文件与 Admin 日志页将输出 DEBUG 级别事件"
         );
     }
 
@@ -273,6 +336,25 @@ async fn main() {
         .with_forward_suggestion_mode(config.forward_suggestion_mode)
         .with_forward_suggestion_mode_arc(suggestion_mode.clone())
         .with_fingerprint_tracker(fingerprint_tracker.clone());
+    if config.prompt_cache_accounting {
+        let snapshot = throttle_data_dir.join("prompt_cache.json");
+        let cache = Arc::new(cache::breakpoint::BreakpointCache::new(
+            config.prompt_cache_min_tokens,
+            Some(snapshot.clone()),
+        ));
+        cache.start_maintenance();
+        tracing::info!(
+            "Prompt cache 断点记账已启用 (min_tokens={}, 已恢复 {} 条, 快照 {:?})",
+            if config.prompt_cache_min_tokens > 0 {
+                config.prompt_cache_min_tokens.to_string()
+            } else {
+                "按模型".to_string()
+            },
+            cache.len(),
+            snapshot
+        );
+        anthropic_app_state = anthropic_app_state.with_breakpoint_cache(cache);
+    }
     if config.forward_suggestion_mode {
         tracing::info!(
             "Suggestion Mode 输入建议请求已放行（forward_suggestion_mode=true），将正常转发上游"

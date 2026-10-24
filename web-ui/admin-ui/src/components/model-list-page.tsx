@@ -15,11 +15,14 @@ import { extractErrorMessage } from '@/lib/utils'
 import { localeTag } from '@/lib/locale'
 import type { ModelItem } from '@/types/api'
 import {
+  AUTO_MODEL_ID,
   FAMILY_AUTO,
   FAMILY_OTHER,
+  familyBrand,
   formatRate,
   formatRateRange,
   groupByFamily,
+  groupByFamilyWith,
   rateRange,
 } from '@/lib/model-family'
 
@@ -49,7 +52,7 @@ const BADGE_NEW =
   'text-[9.5px] font-bold leading-none tracking-[.06em] text-[color:var(--badge-new-fg)] ' +
   'bg-[linear-gradient(135deg,var(--badge-new-from)_0%,var(--badge-new-to)_100%)] ' +
   // ring-inset 而非 border：border 会撑大盒模型，h-4 下多 2px 破坏胶囊几何
-  'ring-1 ring-inset ring-[color:var(--badge-new-line)] ' +
+  'ring-[0.5px] ring-inset ring-[color:var(--badge-new-line)] ' +
   // 「shadow:」类型提示必需：裸 var() 会被 Tailwind boxShadowColor 插件（type 含 any）抢走，
   // 编译成 --tw-shadow-color + --tw-shadow:var(--tw-shadow-colored)，而后者默认 0 0 #0000 → 阴影全丢
   'shadow-[shadow:var(--badge-new-shadow)]'
@@ -76,8 +79,8 @@ type RateStatus = 'synced' | 'missing'
  * 此时 rate_multiplier 全为 null。设计稿的「可用 / 已弃用」无对应字段，故改表此语义。
  */
 const RATE_STATUS: Readonly<Record<RateStatus, { cls: string; pip: string; labelKey: string }>> = {
-  synced: { cls: 'border-ok-line bg-ok-soft text-ok', pip: 'bg-ok', labelKey: 'models.statusRateSynced' },
-  missing: { cls: 'border-warn-line bg-warn-soft text-warn', pip: 'bg-warn', labelKey: 'models.statusRateMissing' },
+  synced: { cls: 'border-transparent bg-ok-soft text-ok', pip: 'bg-ok', labelKey: 'models.statusRateSynced' },
+  missing: { cls: 'border-transparent bg-warn-soft text-warn', pip: 'bg-warn', labelKey: 'models.statusRateMissing' },
 }
 
 type ModelFilter = 'all' | RateStatus
@@ -109,8 +112,14 @@ export function ModelListPage() {
   const allRange = rateRange(models)
   const maxRate = allRange?.max ?? 0
   const syncedCount = models.filter((m) => m.rate_multiplier != null).length
-  const allGroups = groupByFamily(models)
-  const providerCount = new Set(models.map((m) => m.owned_by)).size
+  // 家族统计走品牌口径（Claude 5.x/4.x/3.x 同属 Claude 一族），auto 不计入
+  const familyGroups = groupByFamilyWith(models, familyBrand).filter((g) => g.name !== FAMILY_AUTO)
+  // auto 为本代理的智能路由伪模型（owned_by=kiro），非真实上游提供方，不计入
+  const providerCount = new Set(
+    models
+      .filter((m) => m.id !== AUTO_MODEL_ID && m.owned_by !== '' && m.owned_by !== 'unknown')
+      .map((m) => m.owned_by)
+  ).size
   const outputs = models.map((m) => m.max_tokens)
 
   const familyLabel = (name: string): string => {
@@ -176,7 +185,7 @@ export function ModelListPage() {
             /* 清单来源徽章：倍率全缺失即代表后端已回退本地静态表 */
             <span
               className={`${TAG_BASE} ${
-                syncedCount > 0 ? 'border-ok-line bg-ok-soft text-ok' : 'border-warn-line bg-warn-soft text-warn'
+                syncedCount > 0 ? 'border-transparent bg-ok-soft text-ok' : 'border-transparent bg-warn-soft text-warn'
               }`}
             >
               <span
@@ -209,12 +218,12 @@ export function ModelListPage() {
         </Metric>
 
         <Metric label={t('models.metricFamiliesLabel')}>
-          <MetricValue value={String(allGroups.length)} unit={t('models.unitFamilies')} />
+          <MetricValue value={String(familyGroups.length)} unit={t('models.unitFamilies')} />
           <MetricFoot className="truncate">
-            {allGroups.length === 0 ? (
+            {familyGroups.length === 0 ? (
               <span>{t('models.emptyNoModels')}</span>
             ) : (
-              allGroups.slice(0, FAMILY_PREVIEW).map((group, i) => (
+              familyGroups.slice(0, FAMILY_PREVIEW).map((group, i) => (
                 <span key={group.name} className="flex items-center gap-1.5">
                   {i > 0 && <FootSep />}
                   {familyLabel(group.name)}
@@ -222,10 +231,10 @@ export function ModelListPage() {
                 </span>
               ))
             )}
-            {allGroups.length > FAMILY_PREVIEW && (
+            {familyGroups.length > FAMILY_PREVIEW && (
               <>
                 <FootSep />
-                <span>{t('models.metricFamiliesMore', { n: allGroups.length - FAMILY_PREVIEW })}</span>
+                <span>{t('models.metricFamiliesMore', { n: familyGroups.length - FAMILY_PREVIEW })}</span>
               </>
             )}
           </MetricFoot>
@@ -352,7 +361,7 @@ export function ModelListPage() {
                   <Fragment key={group.name}>
                     {/* 设计稿 .grp 分组行：家族名 + 数量 + 该组倍率区间 */}
                     <tr className="bg-surface-2">
-                      <td colSpan={5} className="border-b border-hairline px-3 py-[7px]">
+                      <td colSpan={5} className="border-b-[0.5px] border-hairline px-3 py-[7px]">
                         <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-ink-2">
                           <Boxes className="size-[13px] flex-none text-ink-3" strokeWidth={1.7} aria-hidden="true" />
                           {familyLabel(group.name)}
@@ -361,7 +370,7 @@ export function ModelListPage() {
                           </span>
                         </span>
                       </td>
-                      <td colSpan={2} className="border-b border-hairline px-3 py-[7px] text-right">
+                      <td colSpan={2} className="border-b-[0.5px] border-hairline px-3 py-[7px] text-right">
                         <span className="whitespace-nowrap font-mono text-[10.5px] tabular-nums text-ink-3">
                           {formatRateRange(rateRange(group.models))}
                         </span>
@@ -392,6 +401,11 @@ export function ModelListPage() {
                               </div>
                               {model.display_name !== '' && model.display_name !== model.id && (
                                 <span className="truncate text-[11px] text-ink-3">{model.display_name}</span>
+                              )}
+                              {model.description && (
+                                <span className="truncate text-[11px] text-ink-3" title={model.description}>
+                                  {model.description}
+                                </span>
                               )}
                             </div>
                           </td>

@@ -8,7 +8,8 @@
 //! 2. system 提示走独立的 `instructions` 字段
 //! 3. 工具声明有两个来源：顶层 `tools`，以及 `input` 里的 `additional_tools` item
 //!    （Codex CLI 0.148 起只用后者），且多出 `custom`（自由文本入参）与
-//!    `namespace`（工具分组容器）两类
+//!    `namespace`（工具分组容器）两类。`functions` 容器直接剥掉；其余 namespace（MCP server、
+//!    子代理）的子工具展开成扁平名 `ns__叶子名`，响应侧再拆回 `namespace` + `name`
 //!
 //! 文本压平、图片转换、工具 schema 规范化、`reasoning` 映射等公共逻辑直接复用
 //! `chat_request` 中已验证的实现。
@@ -37,6 +38,7 @@ mod tools;
 mod tests;
 
 use items::convert_input_items;
+pub(crate) use tools::NamespaceMap;
 use tools::{COMPACTION_SYSTEM_PROMPT, ConvertedResponsesRequest, ToolCollector};
 
 /// 把 OpenAI Responses 请求体转换为 Anthropic Messages 请求体
@@ -73,7 +75,7 @@ pub(crate) fn convert(body: &Value) -> Result<ConvertedResponsesRequest, String>
         system.push(json!({"type": "text", "text": instructions}));
     }
 
-    // 顶层 tools 先收，同名时压过 input 里 additional_tools 的声明
+    // 顶层 tools 先收，相同身份重复时压过 input 里 additional_tools 的声明
     let mut tools = ToolCollector::default();
     if let Some(list) = body.get("tools").and_then(Value::as_array) {
         tools.push_list(list, 0);
@@ -99,6 +101,13 @@ pub(crate) fn convert(body: &Value) -> Result<ConvertedResponsesRequest, String>
         }
         _ => return Err("字段 'input' 缺失或类型不支持（应为字符串或数组）".to_string()),
     };
+
+    // 同一上游名字必须对应唯一工具身份，声明或历史回放发生碰撞时在调用 provider 前拒绝。
+    tools.validate_names(
+        body.get("input")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice),
+    )?;
 
     let messages = acc.into_messages();
     if messages.is_empty() {
@@ -137,6 +146,7 @@ pub(crate) fn convert(body: &Value) -> Result<ConvertedResponsesRequest, String>
         stream,
         anthropic_body: anthropic,
         custom_tools: tools.custom,
+        namespaced_tools: tools.namespaced,
         is_compaction,
     })
 }
