@@ -169,6 +169,11 @@ impl StreamContext {
         }
     }
 
+    /// 仅供内部诊断关联空流等错误，不向客户端响应增加账号信息。
+    pub(crate) fn credential_id(&self) -> Option<u64> {
+        self.credential_id
+    }
+
     /// 设置 prompt cache usage
     pub fn with_prompt_cache_usage(mut self, usage: PromptCacheUsage) -> Self {
         self.prompt_cache_usage = usage;

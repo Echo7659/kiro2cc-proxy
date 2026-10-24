@@ -80,14 +80,12 @@ impl KiroProvider {
         let mut sends_by_account: HashMap<u64, usize> = HashMap::new();
 
         for attempt in 0..max_retries {
-            // Restrict the actual selection pool; the manager's avoid list is deliberately
-            // advisory and must not be relied on for hard send budgets or cooldowns.
-            let pool_ids: Vec<u64> = self
+            // Model fallback is evaluated against the full authorized pool first.
+            // Applying it after capacity exclusions could reintroduce a known-unsupported
+            // account merely because the supporting account is temporarily unavailable.
+            let pool_ids = self
                 .token_manager
-                .credential_ids()
-                .into_iter()
-                .filter(|id| bound_ids.is_empty() || bound_ids.contains(id))
-                .collect();
+                .preferred_credential_ids_for_model(model.as_deref(), bound_ids);
             let candidate_ids: Vec<u64> = pool_ids
                 .iter()
                 .copied()
@@ -115,6 +113,13 @@ impl KiroProvider {
                         }
                         .into(),
                     );
+                }
+                if last_error.is_none() && pool_ids.is_empty() {
+                    last_error = Some(anyhow::anyhow!(
+                        "{}",
+                        self.token_manager
+                            .describe_unavailable(model.as_deref(), bound_ids)
+                    ));
                 }
                 break;
             }
@@ -216,9 +221,25 @@ impl KiroProvider {
                     resp
                 }
                 Err(e) => {
-                    if e.downcast_ref::<RateLimitError>().is_some()
-                        || e.downcast_ref::<AccountUnavailableError>().is_some()
-                    {
+                    if let Some(limit) = e.downcast_ref::<RateLimitError>() {
+                        tracing::warn!(
+                            credential_id = ctx.id,
+                            attempt = attempt + 1,
+                            reason = limit.reason,
+                            retry_after_secs = limit.retry_after_secs(),
+                            "上游准入受限，本次请求避让该账号"
+                        );
+                        throttled_in_request.push(ctx.id);
+                        last_error = Some(e);
+                        continue;
+                    }
+                    if e.downcast_ref::<AccountUnavailableError>().is_some() {
+                        tracing::warn!(
+                            credential_id = ctx.id,
+                            attempt = attempt + 1,
+                            reason = "account_unavailable",
+                            "上游账号已不可用，本次请求避让该账号"
+                        );
                         throttled_in_request.push(ctx.id);
                         last_error = Some(e);
                         continue;
@@ -326,6 +347,14 @@ impl KiroProvider {
                     ));
                     continue;
                 }
+                tracing::warn!(
+                    credential_id = ctx.id,
+                    attempt = attempt + 1,
+                    endpoint = ?endpoint.name,
+                    status = status.as_u16(),
+                    model = model.as_deref().unwrap_or("unknown"),
+                    "上游拒绝请求，停止本次重试"
+                );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -417,6 +446,14 @@ impl KiroProvider {
 
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入账号失败
             if status.is_client_error() {
+                tracing::warn!(
+                    credential_id = ctx.id,
+                    attempt = attempt + 1,
+                    endpoint = ?endpoint.name,
+                    status = status.as_u16(),
+                    model = model.as_deref().unwrap_or("unknown"),
+                    "上游拒绝请求，停止本次重试"
+                );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 

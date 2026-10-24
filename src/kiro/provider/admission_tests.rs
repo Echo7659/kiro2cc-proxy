@@ -731,3 +731,253 @@ async fn bound_pool_never_sends_to_an_unbound_account_during_failover() {
     assert_eq!(*calls.lock().await, vec!["Bearer test-account-2"]);
     server.abort();
 }
+
+const OPUS_MODEL: &str = "claude-opus-4.6";
+const OPUS_REQUEST: &str = r#"{"conversationState":{"currentMessage":{"userInputMessage":{"modelId":"claude-opus-4.6"}}}}"#;
+
+/// Accounts 1–3 have no quota, account 4 supports Opus, and account 5 does not.
+/// Model discovery is injected locally so these fixtures never query a provider.
+async fn mixed_model_provider(config: Config) -> KiroProvider {
+    let provider = provider(config, 5);
+    {
+        let mut entries = provider.token_manager.entries.lock();
+        for entry in &mut entries[..3] {
+            entry.disabled = true;
+            entry.credentials.disabled = true;
+            entry.disabled_reason = Some(crate::kiro::token_manager::DisabledReason::QuotaExceeded);
+        }
+        for entry in &mut entries[3..] {
+            entry.credentials.subscription_title = Some("KIRO PRO".into());
+        }
+    }
+    provider
+        .token_manager
+        .refresh_model_support_with(
+            Some(OPUS_MODEL),
+            &[],
+            Duration::from_secs(5),
+            |_, id| async move {
+                Ok(serde_json::from_value(serde_json::json!({
+                    "models": [{"modelId": if id == 4 { OPUS_MODEL } else { "gpt-5" }}]
+                }))
+                .unwrap())
+            },
+        )
+        .await;
+    provider
+}
+
+fn synthetic_account_id(headers: &http::HeaderMap) -> u64 {
+    headers
+        .get(http::header::AUTHORIZATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer test-account-")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn model_supporter_capacity_limits_never_send_to_known_unsupported_account() {
+    for limit in ["rpm", "cooldown", "concurrency"] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let (url, server) = server(Router::new().route(
+            "/",
+            post(move |headers: http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().await.push(synthetic_account_id(&headers));
+                    (http::StatusCode::BAD_REQUEST, "INVALID_MODEL_ID")
+                }
+            }),
+        ))
+        .await;
+        let mut provider = mixed_model_provider(protection_config(1, 20, 2, 1)).await;
+        provider.upstream_url_override = Some(url);
+        let _held = match limit {
+            "rpm" => {
+                provider
+                    .rpm_tracker
+                    .as_ref()
+                    .unwrap()
+                    .try_admit_credential(4, 1)
+                    .unwrap();
+                None
+            }
+            "cooldown" => {
+                provider
+                    .endpoint_registry
+                    .throttle_account(4, Duration::from_secs(120));
+                None
+            }
+            "concurrency" => Some(
+                provider
+                    .semaphore_for(4)
+                    .acquire_many_owned(2)
+                    .await
+                    .unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.call_api(OPUS_REQUEST, false, false, &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        let error = error.downcast_ref::<RateLimitError>().unwrap();
+        match limit {
+            "rpm" => assert_eq!(error.reason, "Upstream account RPM limit"),
+            "cooldown" => assert_eq!(error.reason, "Upstream account cooldown"),
+            "concurrency" => assert_eq!(error.reason, "Upstream account concurrency queue timeout"),
+            _ => unreachable!(),
+        }
+        assert!(
+            calls.lock().await.is_empty(),
+            "unexpected send after {limit}"
+        );
+        assert_eq!(provider.rpm_tracker.as_ref().unwrap().credential_rpm(5), 0);
+        assert!(
+            provider.token_manager.snapshot().entries[3..]
+                .iter()
+                .all(|entry| !entry.disabled && entry.failure_count == 0)
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn model_supporter_send_budget_preserves_original_error_without_unsupported_send() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let (url, server) = server(Router::new().route(
+        "/",
+        post(move |headers: http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                let id = synthetic_account_id(&headers);
+                seen.lock().await.push(id);
+                if id == 4 {
+                    (
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        "synthetic temporary failure",
+                    )
+                } else {
+                    (http::StatusCode::BAD_REQUEST, "INVALID_MODEL_ID")
+                }
+            }
+        }),
+    ))
+    .await;
+    let mut provider = mixed_model_provider(protection_config(0, 20, 2, 1)).await;
+    provider.upstream_url_override = Some(url);
+    let error = provider
+        .call_api(OPUS_REQUEST, false, false, &[])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("503"));
+    assert!(error.to_string().contains("synthetic temporary failure"));
+    assert!(!error.to_string().contains("INVALID_MODEL_ID"));
+    assert_eq!(*calls.lock().await, vec![4, 4, 4]);
+    assert_eq!(provider.rpm_tracker.as_ref().unwrap().credential_rpm(5), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn complete_model_scope_preserves_all_unsupported_fallback_and_key_binding() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let (url, server) = server(Router::new().route(
+        "/",
+        post(move |headers: http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().await.push(synthetic_account_id(&headers));
+                "synthetic success"
+            }
+        }),
+    ))
+    .await;
+    let mut provider = mixed_model_provider(protection_config(0, 20, 2, 1)).await;
+    provider.upstream_url_override = Some(url);
+    // Only account 5 is authorized. The known supporter outside this scope cannot be used.
+    let (response, id) = provider
+        .call_api(OPUS_REQUEST, false, false, &[5])
+        .await
+        .unwrap();
+    assert_eq!(id, 5);
+    assert_eq!(response.text().await.unwrap(), "synthetic success");
+    assert_eq!(*calls.lock().await, vec![5]);
+
+    // The entire unbound enabled pool now explicitly lacks this model: retain upstream fallback.
+    provider
+        .token_manager
+        .model_support
+        .lock()
+        .get_mut(&4)
+        .unwrap()
+        .models = Some(["gpt-5".to_owned()].into_iter().collect());
+    assert_eq!(
+        provider
+            .token_manager
+            .preferred_credential_ids_for_model(Some(OPUS_MODEL), &[]),
+        vec![4, 5]
+    );
+    let (response, id) = provider
+        .call_api(OPUS_REQUEST, false, false, &[])
+        .await
+        .unwrap();
+    assert!([4, 5].contains(&id));
+    response.text().await.unwrap();
+    assert!(calls.lock().await.iter().all(|id| [4, 5].contains(id)));
+    server.abort();
+}
+
+#[tokio::test]
+async fn complete_model_scope_never_bypasses_disabled_or_opus_subscription_gate() {
+    let provider = mixed_model_provider(Config::default()).await;
+    let manager = &provider.token_manager;
+    assert_eq!(
+        manager.preferred_credential_ids_for_model(Some(OPUS_MODEL), &[]),
+        vec![4]
+    );
+    {
+        let mut entries = manager.entries.lock();
+        entries[3].disabled = true;
+    }
+    assert!(
+        manager
+            .preferred_credential_ids_for_model(Some(OPUS_MODEL), &[4])
+            .is_empty()
+    );
+    assert_eq!(
+        manager.preferred_credential_ids_for_model(Some(OPUS_MODEL), &[]),
+        vec![5]
+    );
+    for title in [None, Some("KIRO FREE")] {
+        {
+            let mut entries = manager.entries.lock();
+            entries[3].disabled = false;
+            entries[3].credentials.subscription_title = title.map(str::to_owned);
+        }
+        // A positive ListAvailableModels cache cannot bypass the original subscription gate.
+        assert!(
+            manager
+                .preferred_credential_ids_for_model(Some(OPUS_MODEL), &[4])
+                .is_empty()
+        );
+        assert_eq!(
+            manager.preferred_credential_ids_for_model(Some(OPUS_MODEL), &[]),
+            vec![5]
+        );
+    }
+    assert!(
+        manager
+            .preferred_credential_ids_for_model(Some(OPUS_MODEL), &[1, 2, 3])
+            .is_empty()
+    );
+}

@@ -109,6 +109,30 @@ impl MultiTokenManager {
         kept
     }
 
+    /// 先在完整硬授权范围内决定模型优选池，再由 provider 应用本次请求的
+    /// 预算/冷却限制。不能在缩小后的池上重新触发「全部不支持」回退，
+    /// 否则唯一支持者暂时限流时，会把已排除的不支持账号重新放行。
+    pub(crate) fn preferred_credential_ids_for_model(
+        &self,
+        model: Option<&str>,
+        allowed_ids: &[u64],
+    ) -> Vec<u64> {
+        let is_opus = model.is_some_and(|model| model.to_ascii_lowercase().contains("opus"));
+        let entries = self.entries.lock();
+        let candidates = entries
+            .iter()
+            .filter(|entry| {
+                !entry.disabled
+                    && (allowed_ids.is_empty() || allowed_ids.contains(&entry.id))
+                    && (!is_opus || entry.credentials.supports_opus())
+            })
+            .collect();
+        self.prefer_model_supporters(candidates, model)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect()
+    }
+
     /// 需要探测的账号：范围内、可调度（未禁用且非 Unhealthy）、探测结果缺失或过期
     ///
     /// 范围内可调度账号不足 2 个时没有路由可言，返回空。
