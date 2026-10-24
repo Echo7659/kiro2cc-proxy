@@ -20,9 +20,11 @@ use super::prompt::normalize_billing_header;
 const MAX_SESSIONS: usize = 256;
 /// 单次日志最多列出的新增 / 消失块数
 const MAX_LISTED: usize = 8;
+/// 基线与漂移诊断最多跟踪的系统块数，限制指纹留存与多重集匹配开销。
+pub(super) const MAX_TRACKED_BLOCKS: usize = 256;
 
 /// 单个系统块的指纹：内容哈希 + 字节长度
-type Fingerprint = (u64, usize);
+pub(super) type Fingerprint = (u64, usize);
 
 static PREV_BLOCKS: OnceLock<Mutex<HashMap<String, Vec<Fingerprint>>>> = OnceLock::new();
 /// 每个会话上一次被分流的动态块数量，用于只在数量变化时写日志
@@ -36,7 +38,7 @@ struct AddedBlock {
     fingerprint: u64,
 }
 
-fn fingerprint(block: &str) -> Fingerprint {
+pub(super) fn fingerprint(block: &str) -> Fingerprint {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     block.hash(&mut h);
     (h.finish(), block.len())
@@ -70,7 +72,7 @@ fn diff_blocks(prev: &[Fingerprint], current: &[String]) -> (Vec<AddedBlock>, Ve
 /// 记录本次请求的稳定系统块；`key_changed` 为 true（history[0] 缓存 key 首次出现）且该会话
 /// 之前有记录时，输出新增 / 消失块。
 pub(super) fn observe(session_id: &str, stable_blocks: &[&str], key_changed: bool) {
-    if !tracing::enabled!(tracing::Level::DEBUG) {
+    if stable_blocks.len() > MAX_TRACKED_BLOCKS || !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
     // 与 history[0] 的 key 同口径：先规范化 cch，避免计费哈希的逐轮变化被当成漂移
@@ -293,5 +295,34 @@ mod tests {
         ] {
             assert!(!out.contains(private_text), "{out}");
         }
+    }
+
+    #[test]
+    fn oversized_stable_blocks_skip_snapshot_and_debug_diff() {
+        let sid = "drift-oversized-test-session";
+        let blocks = vec!["SYNTHETIC_PRIVATE_OVERSIZED_BLOCK"; MAX_TRACKED_BLOCKS + 1];
+        let buf = BufWriter::default();
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            observe(sid, &blocks, true);
+            observe(sid, &blocks, true);
+            if let Some(map) = PREV_BLOCKS.get() {
+                assert!(!map.lock().unwrap().contains_key(sid));
+            }
+            assert!(buf.0.lock().unwrap().is_empty());
+
+            // 超量请求不占用/污染会话快照；之后的小请求照常记录和比较。
+            observe(sid, &["small baseline"], true);
+            observe(sid, &["small baseline", "small addition"], true);
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(out.matches("[drift]").count(), 1, "{out}");
+        assert!(out.contains("added=1"), "{out}");
+        assert!(!out.contains("SYNTHETIC_PRIVATE"), "{out}");
     }
 }
