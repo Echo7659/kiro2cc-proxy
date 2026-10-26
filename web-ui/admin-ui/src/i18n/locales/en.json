@@ -800,7 +800,26 @@
     "themeDark": "Dark",
     "changelog": "Changelog",
     "changelogDesc": "View version history and release changes.",
-    "openChangelog": "View changelog"
+    "openChangelog": "View changelog",
+    "downloadDumpFiles": "Download dumps"
+  },
+  "dumpFiles": {
+    "dialogTitle": "Dumped Kiro request bodies",
+    "dialogDesc": "These files contain full conversation and credential data — do not share them. The directory is rolled over by time, keeping only the newest files.",
+    "empty": "No dump files yet. Enable \"Dump Kiro Request Body\", then send a request.",
+    "colName": "File",
+    "colSize": "Size",
+    "colTime": "Dumped at",
+    "colActions": "Actions",
+    "download": "Download",
+    "downloading": "Downloading…",
+    "downloadArchive": "Download all as ZIP",
+    "archiving": "Packaging…",
+    "footSummary": "{{count}} files · {{total}} · directory limit {{max}}",
+    "archiveLimitHint": "Each archive is capped at {{limit}}; older files beyond it are excluded.",
+    "truncatedHint": "Total size exceeds the {{limit}} archive cap, so only the newest files will be packaged.",
+    "goneHint": "That file was rolled off — refresh the list and try again.",
+    "archiveGoneHint": "Files were rolled off during packaging — refresh the list and try again."
   },
   "themeSettings": {
     "websiteHint": "Website styles apply colors, cards, buttons and navigation together.",

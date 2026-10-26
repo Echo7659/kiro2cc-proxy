@@ -800,7 +800,26 @@
     "themeDark": "深色",
     "changelog": "更新日志",
     "changelogDesc": "查看版本发布记录与功能变更。",
-    "openChangelog": "查看更新日志"
+    "openChangelog": "查看更新日志",
+    "downloadDumpFiles": "下载落盘文件"
+  },
+  "dumpFiles": {
+    "dialogTitle": "Kiro 请求体落盘文件",
+    "dialogDesc": "文件含完整对话与凭据信息，请勿外传。目录按时间滚动清理，仅保留最新的若干个文件。",
+    "empty": "尚无落盘文件。请先开启「Kiro 请求体落盘取证」，再发送一次请求。",
+    "colName": "文件名",
+    "colSize": "大小",
+    "colTime": "落盘时间",
+    "colActions": "操作",
+    "download": "下载",
+    "downloading": "下载中…",
+    "downloadArchive": "打包下载全部",
+    "archiving": "打包中…",
+    "footSummary": "共 {{count}} 个文件 · {{total}} · 目录上限 {{max}} 个",
+    "archiveLimitHint": "单次打包上限 {{limit}}，超出的旧文件不会包含在内。",
+    "truncatedHint": "总量已超过单次打包上限 {{limit}}，将只打包最新的部分文件。",
+    "goneHint": "该文件已被滚动清理，请刷新列表后重试。",
+    "archiveGoneHint": "打包过程中文件被清理，请刷新列表后重试。"
   },
   "themeSettings": {
     "websiteHint": "网站风格会同步应用配色、卡片、按钮与侧栏样式。",
