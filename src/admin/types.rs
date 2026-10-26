@@ -173,7 +173,8 @@ fn default_auth_method() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddCredentialRequest, CredentialStatusItem};
+    use super::{AddCredentialRequest, CredentialStatusItem, DumpFilesResponse};
+    use crate::common::dump::DumpFileMeta;
 
     /// 构造仅填充必填字段的状态项，其余用默认值
     fn sample_status_item() -> CredentialStatusItem {
@@ -204,6 +205,34 @@ mod tests {
             throttle_count: 0,
             disabled_reason: None,
         }
+    }
+
+    /// Dump 列表响应的字段名与嵌套结构（前端按 camelCase 读取，嵌套项亦然）
+    #[test]
+    fn dump_files_response_serializes_camel_case() {
+        let resp = DumpFilesResponse {
+            files: vec![DumpFileMeta {
+                name: "body-1700000000000.json".to_string(),
+                size_bytes: 1024,
+                created_at_ms: 1700000000000,
+            }],
+            total_bytes: 1024,
+            max_files: 200,
+            max_archive_bytes: 128 * 1024 * 1024,
+        };
+
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["totalBytes"], 1024);
+        assert_eq!(json["maxFiles"], 200);
+        assert_eq!(json["maxArchiveBytes"], 128 * 1024 * 1024);
+        // 嵌套的 DumpFileMeta 同样为 camelCase
+        assert_eq!(json["files"][0]["name"], "body-1700000000000.json");
+        assert_eq!(json["files"][0]["sizeBytes"], 1024);
+        assert_eq!(json["files"][0]["createdAtMs"], 1700000000000i64);
+        // 不应出现 snake_case 泄漏
+        assert!(json["files"][0].get("size_bytes").is_none());
+        assert!(json.get("total_bytes").is_none());
     }
 
     /// 登录来源与区域配置需随状态列表下发，前端弹窗据此展示
@@ -437,6 +466,23 @@ pub struct DumpKiroBodyResponse {
 pub struct SetDumpKiroBodyRequest {
     /// 是否把发往 Kiro 的请求体落盘到 app/config/kiro-body-dump/
     pub enabled: bool,
+}
+
+/// Dump 文件列表响应
+///
+/// 领域类型复用 `common::dump::DumpFileMeta`（已带 camelCase serde 属性），
+/// 本类型只做 HTTP 响应包裹，不重复定义同义结构。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpFilesResponse {
+    /// 目录内符合命名规则的 dump 文件，按文件名（即时间）排序
+    pub files: Vec<crate::common::dump::DumpFileMeta>,
+    /// 上述文件累计字节数
+    pub total_bytes: u64,
+    /// 滚动清理保留的文件数上限（取自 `common::dump::MAX_DUMP_FILES`）
+    pub max_files: usize,
+    /// 归档总量上限，供前端判断是否提示截断（取自 `common::dump::MAX_ARCHIVE_BYTES`）
+    pub max_archive_bytes: u64,
 }
 
 /// DEBUG 日志开关查询响应

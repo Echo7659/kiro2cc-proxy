@@ -16,6 +16,7 @@ use super::{
         list_api_keys, reset_key_usage, update_api_key,
     },
     changelog::get_changelog,
+    dump_handler::{download_dump_archive, download_dump_file, list_dump_files_handler},
     handlers::{
         add_credential, delete_credential, get_all_credentials, get_auth_keys,
         get_client_token_passthrough, get_credential_balance, get_debug_logs, get_dump_kiro_body,
@@ -113,6 +114,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/usage/daily/{date}/records", get(get_daily_usage_records))
         .route("/usage/records", get(get_usage_records))
         .route("/geo/batch", get(get_geo_batch))
+        // dump 落盘文件的浏览与下载（列表 / 单文件 / 全量 ZIP）
+        .route("/dump-kiro-body/files", get(list_dump_files_handler))
+        .route("/dump-kiro-body/files/{name}", get(download_dump_file))
+        .route("/dump-kiro-body/archive", get(download_dump_archive))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

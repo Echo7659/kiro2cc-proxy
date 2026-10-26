@@ -24,6 +24,7 @@ import type {
   FailureLogsResponse,
   ModelsResponse,
   ReleaseNotesResponse,
+  DumpFilesResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -203,6 +204,12 @@ export async function getDebugLogs(): Promise<{ enabled: boolean }> {
 // 设置 DEBUG 日志开关（全局热生效：控制台 / 日志文件 / 日志页三处一致）
 export async function setDebugLogs(enabled: boolean): Promise<{ success: boolean; message: string }> {
   const { data } = await api.put<{ success: boolean; message: string }>('/config/debug-logs', { enabled })
+  return data
+}
+
+// 获取 dump 落盘文件清单（仅 JSON；二进制下载走 fetch + Blob，不经本层）
+export async function getDumpFiles(): Promise<DumpFilesResponse> {
+  const { data } = await api.get<DumpFilesResponse>('/dump-kiro-body/files')
   return data
 }
 

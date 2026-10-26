@@ -376,80 +376,23 @@ pub fn kiro_body_dump_enabled() -> bool {
 }
 
 fn dump_kiro_request_body(request_body: &str) {
-    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const MAX_DUMP_FILES: usize = 200;
-    const COLLISION_RETRIES: usize = 5;
-
-    let dir = std::path::Path::new("app/config/kiro-body-dump");
-    if std::fs::create_dir_all(dir).is_err() {
-        tracing::warn!("[BODY-DUMP] 创建 dump 目录失败");
-        return;
-    }
-    // 按文件名排序（毫秒时间戳命名天然按时间有序），保留最近 MAX_DUMP_FILES 个，
-    // 防止长时间开启落盘取证后磁盘无限增长
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
-                .collect()
-        })
-        .unwrap_or_default();
-    if entries.len() >= MAX_DUMP_FILES {
-        entries.sort();
-        let excess = entries.len() - MAX_DUMP_FILES + 1;
-        for stale in &entries[..excess] {
-            if let Err(e) = std::fs::remove_file(stale) {
-                tracing::warn!(
-                    "[BODY-DUMP] 清理旧 dump 文件失败 {}: {}",
-                    stale.display(),
-                    e
-                );
-            }
-        }
-    }
+    // 毫秒时间戳远小于 u64 上限，收敛到 u64 与 dump 模块命名口径一致
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or_default();
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.mode(0o600);
+    // 目录创建、滚动清理（含与列表端点同源的命名谓词）、0600 权限与冲突重试
+    // 均由 common::dump 承担，避免此处与 admin 下载侧出现两份字面量而漂移
+    match crate::common::dump::write_dump_body_in(
+        std::path::Path::new(crate::common::dump::DUMP_DIR),
+        request_body,
+        ts,
+    ) {
+        Ok(path) => tracing::info!("[BODY-DUMP] 已写入 {}", path.display()),
+        Err(e) => tracing::warn!("[BODY-DUMP] 写入失败: {}", e),
     }
-    // 命名与边界对齐：共 MAX_FILENAME_ATTEMPTS 次尝试（含首次），COLLISION_RETRIES 为重试上限
-    const MAX_FILENAME_ATTEMPTS: usize = COLLISION_RETRIES + 1;
-    let mut path = dir.join(format!("body-{ts}.json"));
-    for attempt in 0..MAX_FILENAME_ATTEMPTS {
-        path = dir.join(if attempt == 0 {
-            format!("body-{ts}.json")
-        } else {
-            format!("body-{ts}-{attempt}.json")
-        });
-        let result = open
-            .open(&path)
-            .and_then(|mut f| f.write_all(request_body.as_bytes()));
-        match result {
-            Ok(()) => {
-                tracing::info!("[BODY-DUMP] 已写入 {}", path.display());
-                return;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                tracing::warn!("[BODY-DUMP] 写入失败: {}", e);
-                return;
-            }
-        }
-    }
-    tracing::warn!(
-        "[BODY-DUMP] 写入失败: 文件名冲突重试 {} 次仍失败（{}）",
-        COLLISION_RETRIES,
-        path.display()
-    );
 }
 
 #[cfg(test)]
