@@ -67,6 +67,20 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn build_release_notes() -> Vec<ReleaseNote> {
     let mut notes = vec![
         ReleaseNote {
+            version: "3.4.41".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "设置页「Kiro 请求体落盘取证」新增网页端浏览与下载：管理员可在弹窗中列出落盘文件、逐个下载或一键打包 ZIP 下载，容器化部署无需再通过 SSH / docker cp 取回；下载走 x-api-key 头鉴权，凭据不进查询参数。同时收紧了落盘文件的清理判据（仅识别规范命名的 dump 文件，手工放入的其他 json 不再被计数或删除）并为写入加锁，修复并发写入可能超出 200 个上限的竞态",
+                    "The Kiro request-body dump setting now offers in-browser browsing and download: admins can list dump files in a dialog, download them one by one or as a single ZIP, with no need for SSH / docker cp in containerised deployments. Downloads authenticate with the x-api-key header, so credentials never appear in query strings. The cleanup predicate is also tightened (only well-formed dump file names are recognised; hand-placed json files are no longer counted or deleted) and writes are serialised, fixing a race where concurrent writes could exceed the 200-file cap",
+                )]),
+                fix_group(vec![Bilingual::new(
+                    "修复编辑账号时 Client Secret 被浏览器自动填充的管理密码覆盖（#58）：登录页保存的管理密码会被填进弹窗里的 password 框，保存后被当作 clientSecret 写入，要等 token 到期刷新才报 invalid_client 并被禁用，且管理密码会随刷新请求发往 AWS。现在 password 输入框默认禁用浏览器与 1Password / LastPass / Bitwarden 的自动填充；后端在 clientId 或 IdC 账号的 clientSecret 改为非空新值时，先用更新后的配置（含同次提交的代理与区域）试刷新，失败则拒绝保存；更新日志记录涉及的字段名（不含值）。已被覆盖的账号需重新填入真实的 clientSecret",
+                    "Fixed the Client Secret being overwritten by a browser-autofilled admin password when editing an account (#58): the admin password saved from the login page was autofilled into password fields in the dialog and saved as clientSecret, only surfacing as invalid_client at the next token refresh (after which the account was disabled), and the admin password would be sent to AWS with each refresh. Password inputs now opt out of browser and 1Password / LastPass / Bitwarden autofill by default; when clientId, or clientSecret on an IdC account, is changed to a non-empty value the backend first trial-refreshes with the updated configuration (including a proxy or region changed in the same request) and rejects the save on failure; the update log now records the names of the fields involved (never values). Accounts already overwritten need their real clientSecret entered again",
+                )]),
+            ],
+        },
+        ReleaseNote {
             version: "3.4.40".to_string(),
             is_latest: false,
             groups: vec![
