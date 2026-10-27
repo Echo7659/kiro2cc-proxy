@@ -138,19 +138,6 @@ export function UsageLogPage({ onBack }: UsageLogPageProps) {
                 </Card>
                 <Card>
                   <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-ink-3 flex items-center gap-1">
-                      <DollarSign className="h-3.5 w-3.5" />
-                      本页费用
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold text-warn">
-                      {formatCost(pageCost)}
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
                     <CardTitle className="text-sm font-medium text-ink-3">本页 Credits</CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -162,6 +149,19 @@ export function UsageLogPage({ onBack }: UsageLogPageProps) {
                         省 {pageCreditsSaved.toFixed(4)}
                       </div>
                     )}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm font-medium text-ink-3 flex items-center gap-1">
+                      <DollarSign className="h-3.5 w-3.5" />
+                      本页费用
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold text-warn">
+                      {formatCost(pageCost)}
+                    </div>
                   </CardContent>
                 </Card>
               </div>

@@ -118,7 +118,7 @@ export function MetricValue({
   const unitCls =
     unitClass ?? (compact ? 'text-[11px] font-medium text-ink-3' : 'text-[13px] font-medium text-ink-3')
   return (
-    <div className="flex items-baseline gap-1.5">
+    <div className="my-auto flex items-baseline gap-1.5">
       <span
         className={`${compact ? 'text-[20px]' : 'text-[28px]'} font-bold leading-[1.1] tracking-[-0.02em] tabular-nums ${valueClass}`}
         title={value}

@@ -140,14 +140,6 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
             </span>
           </MetricFoot>
         </Metric>
-        <Metric label={t('dailyStats.metricTotalCostLabel')}>
-          <MetricValue value={hasUsageSummary ? formatCost(totalCost) : '—'} />
-          <MetricFoot className="min-w-0">
-            <span className="min-w-0 truncate" title={t('dailyStats.totalCostHint')}>
-              {t('dailyStats.totalCostHint')}
-            </span>
-          </MetricFoot>
-        </Metric>
         <Metric label={t('dailyStats.metricTotalCreditsLabel')}>
           <MetricValue
             value={hasUsageSummary ? creditsText(totalCredits) : '—'}
@@ -160,19 +152,27 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
             </span>
           </MetricFoot>
         </Metric>
-        <Metric label={t('credentials.pageTokens')}>
-          <MetricValue value={formatTokenCount(pageInput + pageOutput)} />
-          <MetricFoot>
-            <span>{t('common.inboundPrefix', { value: formatTokenCount(pageInput) })}</span>
-            <FootSep />
-            <span>{t('common.outboundPrefix', { value: formatTokenCount(pageOutput) })}</span>
+        <Metric label={t('dailyStats.metricTotalCostLabel')}>
+          <MetricValue value={hasUsageSummary ? formatCost(totalCost) : '—'} />
+          <MetricFoot className="min-w-0">
+            <span className="min-w-0 truncate" title={t('dailyStats.totalCostHint')}>
+              {t('dailyStats.totalCostHint')}
+            </span>
           </MetricFoot>
         </Metric>
-        <Metric label={t('common.pageCost')}>
-          <MetricValue value={formatCost(pageCost)} />
+        <Metric label={t('credentials.pageTokens')}>
+          <MetricValue value={formatTokenCount(pageInput + pageOutput)} />
+          <MetricFoot className="whitespace-nowrap">
+            <span>{t('common.inboundPrefix', { value: formatCompactToken(pageInput) })}</span>
+            <FootSep />
+            <span>{t('common.outboundPrefix', { value: formatCompactToken(pageOutput) })}</span>
+          </MetricFoot>
         </Metric>
         <Metric label={t('common.pageCredits')}>
           <MetricValue value={creditsText(pageCredits)} unit={t('dailyStats.unitCredits')} trailing={savedTrailing(pageSaved)} />
+        </Metric>
+        <Metric label={t('common.pageCost')}>
+          <MetricValue value={formatCost(pageCost)} />
         </Metric>
         <Metric label={t('credentials.todayCredits')}>
           <MetricValue
