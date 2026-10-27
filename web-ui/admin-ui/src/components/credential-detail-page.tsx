@@ -144,12 +144,13 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
           <MetricValue
             value={hasUsageSummary ? creditsText(totalCredits) : '—'}
             unit={t('dailyStats.unitCredits')}
-            trailing={savedTrailing(totalCreditsSaved)}
           />
           <MetricFoot className="min-w-0">
             <span className="min-w-0 truncate" title={t('dailyStats.totalCreditsHint')}>
               {t('dailyStats.totalCreditsHint')}
             </span>
+            {totalCreditsSaved > 0 && <FootSep />}
+            {savedTrailing(totalCreditsSaved)}
           </MetricFoot>
         </Metric>
         <Metric label={t('dailyStats.metricTotalCostLabel')}>
@@ -169,7 +170,8 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
           </MetricFoot>
         </Metric>
         <Metric label={t('common.pageCredits')}>
-          <MetricValue value={creditsText(pageCredits)} unit={t('dailyStats.unitCredits')} trailing={savedTrailing(pageSaved)} />
+          <MetricValue value={creditsText(pageCredits)} unit={t('dailyStats.unitCredits')} />
+          <MetricFoot>{savedTrailing(pageSaved)}</MetricFoot>
         </Metric>
         <Metric label={t('common.pageCost')}>
           <MetricValue value={formatCost(pageCost)} />
@@ -178,11 +180,13 @@ export function CredentialDetailPage({ credentialId, onBack }: CredentialDetailP
           <MetricValue
             value={creditsText(todaySummary?.totalCredits ?? 0)}
             unit={t('dailyStats.unitCredits')}
-            trailing={savedTrailing(todaySaved)}
           />
-          {todayRequests > 0 && (
-            <MetricFoot>{t('credentials.todayRequestsCount', { count: todayRequests })}</MetricFoot>
-          )}
+          <MetricFoot>
+            {savedTrailing(todaySaved)}
+            {todayRequests > 0 && (
+              <span>{t('credentials.todayRequestsCount', { count: todayRequests })}</span>
+            )}
+          </MetricFoot>
         </Metric>
       </MetricsBar>
 
