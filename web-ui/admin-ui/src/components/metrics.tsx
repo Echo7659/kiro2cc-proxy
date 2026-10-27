@@ -59,7 +59,7 @@ export function Metric({
   children: ReactNode
 }) {
   const compact = useContext(CompactContext)
-  const shell = `relative flex flex-col justify-between ${compact ? 'min-w-0 px-4 py-3' : 'px-6 py-3.5'} text-left`
+  const shell = `relative grid grid-rows-[auto_1fr_18px] ${compact ? 'min-w-0 px-4 py-3' : 'px-6 py-3.5'} text-left`
   const inner = (
     <>
       {/* cell-header：icon 在 label 左侧，space-between 对齐 */}
@@ -118,7 +118,7 @@ export function MetricValue({
   const unitCls =
     unitClass ?? (compact ? 'text-[11px] font-medium text-ink-3' : 'text-[13px] font-medium text-ink-3')
   return (
-    <div className="flex items-baseline gap-1.5">
+    <div className="flex items-baseline gap-1.5 self-center whitespace-nowrap">
       <span
         className={`${compact ? 'text-[20px]' : 'text-[28px]'} font-bold leading-[1.1] tracking-[-0.02em] tabular-nums ${valueClass}`}
         title={value}

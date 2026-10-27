@@ -105,10 +105,10 @@ export function UsageMetricsBar({
             <FootText>{t('common.pageInfoSimple', { current: page, total: totalPages })}</FootText>
           </MetricFoot>
         </Metric>
-        <Metric label={t('dailyStats.metricTotalCostLabel')}>
-          <MetricValue value={hasDaily ? formatCost(totals.cost) : '—'} />
+        <Metric label={t('dailyStats.metricTotalTokensLabel')}>
+          <MetricValue value={hasDaily ? tokenText(totals.tokens) : '—'} />
           <MetricFoot className="min-w-0">
-            <FootText title={t('dailyStats.totalCostHint')}>{t('dailyStats.totalCostHint')}</FootText>
+            <FootText title={t('dailyStats.totalTokensHint')}>{t('dailyStats.totalTokensHint')}</FootText>
           </MetricFoot>
         </Metric>
         <Metric label={t('dailyStats.metricTotalCreditsLabel')}>
@@ -120,19 +120,21 @@ export function UsageMetricsBar({
             <FootText title={t('dailyStats.totalCreditsHint')}>{t('dailyStats.totalCreditsHint')}</FootText>
           </MetricFoot>
         </Metric>
-        <Metric label={t('dailyStats.metricTotalTokensLabel')}>
-          <MetricValue value={hasDaily ? tokenText(totals.tokens) : '—'} />
+        <Metric label={t('dailyStats.metricTotalCostLabel')}>
+          <MetricValue value={hasDaily ? formatCost(totals.cost) : '—'} />
           <MetricFoot className="min-w-0">
-            <FootText title={t('dailyStats.totalTokensHint')}>{t('dailyStats.totalTokensHint')}</FootText>
+            <FootText title={t('dailyStats.totalCostHint')}>{t('dailyStats.totalCostHint')}</FootText>
           </MetricFoot>
         </Metric>
-        <Metric label={t('common.pageCost')}>
-          <MetricValue value={formatCost(pageCost)} />
+        <Metric label={t('dailyStats.metricPageTokensLabel')}>
+          <MetricValue value={tokenText(pageTokens)} />
           <MetricFoot className="min-w-0">
             <FootText>
-              {t('dailyStats.detailAvgCost')}{' '}
-              <b className="font-semibold text-ink-2">{formatCost(avgCost)}</b>
+              {t('dailyStats.metricCacheRead')}{' '}
+              <b className="font-semibold text-ok">{formatCompactToken(pageCacheRead)}</b>
             </FootText>
+            <FootSep />
+            <span className="shrink-0">{cacheShare.toFixed(1)}%</span>
           </MetricFoot>
         </Metric>
         <Metric label={t('common.pageCredits')}>
@@ -147,15 +149,13 @@ export function UsageMetricsBar({
             )}
           </MetricFoot>
         </Metric>
-        <Metric label={t('dailyStats.metricPageTokensLabel')}>
-          <MetricValue value={tokenText(pageTokens)} />
+        <Metric label={t('common.pageCost')}>
+          <MetricValue value={formatCost(pageCost)} />
           <MetricFoot className="min-w-0">
             <FootText>
-              {t('dailyStats.metricCacheRead')}{' '}
-              <b className="font-semibold text-ok">{formatCompactToken(pageCacheRead)}</b>
+              {t('dailyStats.detailAvgCost')}{' '}
+              <b className="font-semibold text-ink-2">{formatCost(avgCost)}</b>
             </FootText>
-            <FootSep />
-            <span className="shrink-0">{cacheShare.toFixed(1)}%</span>
           </MetricFoot>
         </Metric>
       </MetricsBar>

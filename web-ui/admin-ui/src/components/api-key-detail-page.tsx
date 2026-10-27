@@ -119,9 +119,6 @@ export function ApiKeyDetailPage({ keyId, onBack }: ApiKeyDetailPageProps) {
         <Metric label={t('apiKeys.colOutputTokens')}>
           <MetricValue value={formatTokenCount(summary?.totalOutputTokens ?? 0)} />
         </Metric>
-        <Metric label={t('apiKeys.totalCostLabel')}>
-          <MetricValue value={formatCost(summary?.totalCost ?? 0)} />
-        </Metric>
         <Metric label={t('apiKeys.totalCreditsLabel')}>
           <MetricValue
             value={fallbackCredits(summary?.totalCost ?? 0).toFixed(4)}
@@ -134,6 +131,9 @@ export function ApiKeyDetailPage({ keyId, onBack }: ApiKeyDetailPageProps) {
               ) : undefined
             }
           />
+        </Metric>
+        <Metric label={t('apiKeys.totalCostLabel')}>
+          <MetricValue value={formatCost(summary?.totalCost ?? 0)} />
         </Metric>
       </MetricsBar>
 
