@@ -940,12 +940,15 @@ Thanks to all the contributors of this project (in no particular order):
 - [xhsngdsan](https://github.com/xhsngdsan)
 - [zbjincheng](https://github.com/zbjincheng) — [#41](https://github.com/TsinHzl/kiro2cc-proxy/pull/41)
 
-**Special thanks** — the following issues directly drove critical fixes:
+**thanks** — the following issues directly drove critical fixes:
 
-- [jayus71](https://github.com/jayus71) — [#56](https://github.com/TsinHzl/kiro2cc-proxy/issues/56)
+- [NoahNyy](https://github.com/NoahNyy) — [#58](https://github.com/TsinHzl/kiro2cc-proxy/issues/58), [#57](https://github.com/TsinHzl/kiro2cc-proxy/issues/57)
+- [jayus71](https://github.com/jayus71) — [#56](https://github.com/TsinHzl/kiro2cc-proxy/issues/56), [#52](https://github.com/TsinHzl/kiro2cc-proxy/issues/52)
 - [aidenli](https://github.com/aidenli) — [#54](https://github.com/TsinHzl/kiro2cc-proxy/issues/54)
 - [AX10MER](https://github.com/AX10MER) — [#47](https://github.com/TsinHzl/kiro2cc-proxy/issues/47)
 - [C2Y-cyber](https://github.com/C2Y-cyber) — [#46](https://github.com/TsinHzl/kiro2cc-proxy/issues/46)
 - [XiaoZhuiWang](https://github.com/XiaoZhuiWang) — [#40](https://github.com/TsinHzl/kiro2cc-proxy/issues/40)
+- [SunNorthGod](https://github.com/SunNorthGod) — [#9](https://github.com/TsinHzl/kiro2cc-proxy/issues/9), [#8](https://github.com/TsinHzl/kiro2cc-proxy/issues/8)
+- [RecordingTheSmile](https://github.com/RecordingTheSmile) — [#44](https://github.com/TsinHzl/kiro2cc-proxy/issues/44)
 
 > Thanks to everyone who has filed issues, shared feedback, and joined the discussions — you keep making this project better.
