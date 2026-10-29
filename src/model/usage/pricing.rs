@@ -117,10 +117,12 @@ fn k_ref_of_lower(m: &str) -> f64 {
 /// Haiku 5.5 按官方「整档跳价」口径：输入超 100K 时整个请求走高档
 /// （见 HAIKU_55_LONG_CONTEXT_THRESHOLD）。
 ///
-/// 已知偏差：`input_tokens` 为**不含 cache token** 的净输入
-/// （cache_read / cache_creation 单独字段存储，未参与定价计算），
-/// 故阈值按净输入判定，与官方「prompt 总长度」口径存在系统性低估，
-/// 带长缓存前缀的会话可能被判入低档。
+/// 口径：`input_tokens` 为**含 cache 的总输入**（调用方传入 `final_input_tokens`，
+/// cache_read / cache_creation 是其中的子集，`derive_report_cache_usage` 以
+/// `input - read - creation` 得到未缓存部分），全部按输入全价计算。
+/// 因此返回值是「假设完全没有缓存」的基线费用，`credits_saved =
+/// estimated_cost × k_ref − credits_used` 依赖这一口径，**不要**在此扣减缓存部分。
+/// Haiku 5.5 的 100K 阈值也据此按总输入判定，与官方「prompt 总长度」口径一致。
 pub(crate) fn calculate_cost(model: &str, input_tokens: i32, output_tokens: i32) -> f64 {
     let model_lower = model.to_lowercase();
     let pricing = if is_haiku_55(&model_lower) && input_tokens > HAIKU_55_LONG_CONTEXT_THRESHOLD {
