@@ -18,6 +18,7 @@ import { LogViewerPage } from '@/components/log-viewer-page'
 import { DocsPage } from '@/components/docs-page'
 import { useCredentials, useApiKeys, useDeleteCredential, useResetFailure, useRpm, useDailyUsage, useServerInfo } from '@/hooks/use-credentials'
 import { useTheme } from '@/hooks/use-theme'
+import { useReturnRefresh } from '@/hooks/use-return-refresh'
 import type { CustomRange } from '@/components/daily-shared'
 import { DailyStatsPage, type RangeKey } from '@/components/daily-stats-page'
 import { DailySummaryPage, type SummaryRangeKey } from '@/components/daily-summary-page'
@@ -115,6 +116,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     liveCreditsTotal, setLiveCreditsTotal,
     liveCreditsQueried, setLiveCreditsQueried,
     isFetchingBalances, prevEnabledIdsRef,
+    refreshOnReturn,
   } = useBalanceFetcher({
     credentials: data?.credentials,
     refetch,
@@ -122,6 +124,36 @@ export function Dashboard({ onLogout }: DashboardProps) {
     detailCredentialId,
     dailyView,
     activeTab,
+  })
+  // 浏览器标签页切回前台时自动刷新「账号管理」列表页（详情 / 日志子页、其他菜单页不触发）
+  const onCredentialListView =
+    activeTab === 'credentials' &&
+    dailyView === null &&
+    detailCredentialId === null &&
+    failureLogCredentialId === null &&
+    throttleLogCredentialId === null
+  useReturnRefresh(onCredentialListView, refreshOnReturn)
+
+  // 进入「使用日志」页的状态重置（侧边栏点击与切回浏览器共用，保证两条路径效果一致）：
+  // 区间回到「今日」、清空自定义区间，页面重新挂载后页码回到第 1 页并重拉数据
+  const resetDailyStatsView = () => {
+    setActiveTab('credentials')
+    setDetailKeyId(null)
+    setDetailCredentialId(null)
+    setDailyView('list')
+    setDailyRange('today')
+    setDailyCustomRange(null)
+    setDailyDetailFromSummary(false)
+  }
+  // 浏览器标签页 / 窗口切回前台且停留在「使用日志」页时，等同于再点一次侧边栏「使用日志」：
+  // 该页当前已挂载，需换 key 强制重新挂载，才能得到与"从别的菜单切过来"相同的重置与重拉
+  const [dailyStatsRemountKey, setDailyStatsRemountKey] = useState(0)
+  useReturnRefresh(dailyView === 'list', () => {
+    resetDailyStatsView()
+    queryClient.invalidateQueries({ queryKey: ['dailyUsage'] })
+    queryClient.invalidateQueries({ queryKey: ['dailyUsageRecords'] })
+    queryClient.invalidateQueries({ queryKey: ['usageRecordsByRange'] })
+    setDailyStatsRemountKey((k) => k + 1)
   })
 
   const now = new Date()
@@ -660,7 +692,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       items: [
         { key: 'credentials', label: t('dashboard.navCredentials'), icon: Server, count: data && data.credentials.length > 0 ? data.credentials.length : undefined, active: activeTab === 'credentials' && dailyView === null, onClick: () => { setActiveTab('credentials'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
         { key: 'apikeys', label: 'API Keys', icon: Key, count: apiKeys && apiKeys.length > 0 ? apiKeys.length : undefined, active: activeTab === 'apikeys', onClick: () => { setActiveTab('apikeys'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
-        { key: 'daily', label: t('dashboard.navDailyStats'), icon: BarChart2, count: undefined, active: dailyView !== null, onClick: () => { setActiveTab('credentials'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView('list'); setDailyFromSidebar(true); setDailyRange('today'); setDailyCustomRange(null); setDailyDetailFromSummary(false) } },
+        { key: 'daily', label: t('dashboard.navDailyStats'), icon: BarChart2, count: undefined, active: dailyView !== null, onClick: () => { resetDailyStatsView(); setDailyFromSidebar(true) } },
         { key: 'models', label: t('dashboard.navModels'), icon: Boxes, count: undefined, active: activeTab === 'models', onClick: () => { setActiveTab('models'); setDetailKeyId(null); setDetailCredentialId(null); setDailyView(null) } },
       ],
     },
@@ -729,6 +761,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           )
         ) : dailyView === 'list' ? (
           <DailyStatsPage
+            key={dailyStatsRemountKey}
             showBack={!dailyFromSidebar}
             onBack={() => setDailyView(null)}
             onOpenSummary={() => setDailyView('summary')}
