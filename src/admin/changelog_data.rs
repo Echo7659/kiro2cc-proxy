@@ -67,6 +67,16 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn build_release_notes() -> Vec<ReleaseNote> {
     let mut notes = vec![
         ReleaseNote {
+            version: "3.4.42".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "账号管理与使用日志页切回浏览器标签页时自动刷新数据，避免长时间停留在页面后展示过期状态",
+                    "The account-manager and usage-log pages now auto-refresh their data when the browser tab regains focus, so stale state is not shown after the page has been idle",
+                )]),
+            ],
+        },
+        ReleaseNote {
             version: "3.4.41".to_string(),
             is_latest: false,
             groups: vec![
