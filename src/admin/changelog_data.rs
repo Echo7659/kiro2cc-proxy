@@ -67,6 +67,22 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn build_release_notes() -> Vec<ReleaseNote> {
     let mut notes = vec![
         ReleaseNote {
+            version: "3.4.43".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "聊天回复末尾新增 turn/session credits 展示（showSessionCredits）：对话结束时把本次所耗与累计的 credits 一并呈现给用户",
+                        "The end of a chat reply now shows turn/session credits (showSessionCredits): on conversation end the credits consumed this turn and the running session total are presented to the user",
+                    ),
+                    Bilingual::new(
+                        "管理端弹窗与下拉菜单增加进出场动画，交互过渡更平滑",
+                        "The admin-side dialogs and dropdown menus now animate on open and close, making transitions smoother",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
             version: "3.4.42".to_string(),
             is_latest: false,
             groups: vec![
