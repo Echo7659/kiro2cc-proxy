@@ -40,6 +40,7 @@ import { Sidebar } from '@/components/dashboard/sidebar'
 import { CredentialList } from '@/components/dashboard/credential-list'
 import { type VerifyResult } from '@/components/batch-verify-dialog'
 import { DashboardDialogs } from '@/components/dashboard/dialogs'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { DashboardHeadMetrics } from '@/components/dashboard/head-metrics'
 import { useBalanceFetcher } from '@/components/dashboard/use-balance-fetcher'
 import { ACCOUNT_SORT_STORAGE_KEY, ACCOUNT_SORT_STORAGE_KEY_DIR, CREDITS_DELTA_MIN_BASE, formatLocalDate, SIDEBAR_COLLAPSED_STORAGE_KEY, SIDEBAR_TRANSITION_MS, readStoredSidebarCollapsed } from '@/components/dashboard/panel-constants'
@@ -406,7 +407,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     const ids = Array.from(selectedIds)
 
-    if (!confirm(t('dashboard.confirmDeleteSelected', { count: ids.length }))) {
+    if (!(await confirmDialog(t('dashboard.confirmDeleteSelected', { count: ids.length })))) {
       return
     }
 
