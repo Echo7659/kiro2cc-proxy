@@ -124,6 +124,8 @@ fn codewhisperer_host_lowered(region: &str) -> String {
 #[derive(Default)]
 pub struct EndpointBucketRegistry {
     inner: Mutex<HashMap<(u64, EndpointName), Instant>>,
+    /// Upstream Retry-After applies to the account, including MCP and every endpoint.
+    account_cooldowns: Mutex<HashMap<u64, Instant>>,
 }
 
 impl EndpointBucketRegistry {
@@ -134,11 +136,60 @@ impl EndpointBucketRegistry {
     /// 标记 `(credential_id, name)` 桶封禁至 `now + duration`
     pub fn throttle(&self, credential_id: u64, name: EndpointName, duration: Duration) {
         let mut guard = self.inner.lock();
-        guard.insert((credential_id, name), Instant::now() + duration);
+        let until = Instant::now() + duration;
+        guard
+            .entry((credential_id, name))
+            .and_modify(|old| *old = (*old).max(until))
+            .or_insert(until);
+    }
+
+    pub fn throttle_account(&self, credential_id: u64, duration: Duration) {
+        let until = Instant::now()
+            .checked_add(duration)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(86400));
+        let mut guard = self.account_cooldowns.lock();
+        guard
+            .entry(credential_id)
+            .and_modify(|old| *old = (*old).max(until))
+            .or_insert(until);
+    }
+
+    pub fn account_cooldown_remaining(&self, credential_id: u64) -> Option<Duration> {
+        let mut guard = self.account_cooldowns.lock();
+        let until = *guard.get(&credential_id)?;
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            guard.remove(&credential_id);
+            None
+        } else {
+            Some(remaining)
+        }
+    }
+
+    /// Earliest allowed endpoint, with account cooldown taking precedence.
+    pub fn next_available_in(&self, credential_id: u64, names: &[EndpointName]) -> Duration {
+        if let Some(delay) = self.account_cooldown_remaining(credential_id) {
+            return delay;
+        }
+        let now = Instant::now();
+        let guard = self.inner.lock();
+        names
+            .iter()
+            .map(|name| {
+                guard
+                    .get(&(credential_id, *name))
+                    .map(|until| until.saturating_duration_since(now))
+                    .unwrap_or_default()
+            })
+            .min()
+            .unwrap_or(BUCKET_THROTTLE_DURATION)
     }
 
     /// 查询桶是否仍被封禁（到期返回 false）
     pub fn is_throttled(&self, credential_id: u64, name: EndpointName) -> bool {
+        if self.account_cooldown_remaining(credential_id).is_some() {
+            return true;
+        }
         let mut guard = self.inner.lock();
         let Some(until) = guard.get(&(credential_id, name)).copied() else {
             return false;
@@ -162,6 +213,18 @@ impl EndpointBucketRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_retry_after_blocks_every_endpoint_and_shorter_updates_cannot_release_it() {
+        let reg = EndpointBucketRegistry::new();
+        reg.throttle_account(1, Duration::from_secs(120));
+        reg.throttle_account(1, Duration::from_secs(1));
+        assert!(reg.account_cooldown_remaining(1).unwrap() > Duration::from_secs(119));
+        for endpoint in EndpointName::ALL {
+            assert!(reg.is_throttled(1, endpoint));
+            assert!(!reg.is_throttled(2, endpoint));
+        }
+    }
 
     #[test]
     fn endpoint_all_returns_four_with_correct_hosts_and_amz_targets() {

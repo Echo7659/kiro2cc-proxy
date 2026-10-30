@@ -1,6 +1,7 @@
 //! StreamContext 主结构：聚合单次流式请求的全部状态（事件缓冲、块状态、usage 统计），是 SSE 状态机的上下文载体。
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::json;
 use uuid::Uuid;
@@ -10,7 +11,6 @@ use crate::kiro::model::events::Event;
 use crate::model::usage::UsageTracker;
 
 use super::calib::{cap_input_tokens, scale_for_client};
-use super::helpers::count_token_chars;
 use super::state::{SseEvent, SseStateManager};
 use super::thinking::{
     find_char_boundary, find_real_thinking_end_tag, find_real_thinking_end_tag_at_buffer_end,
@@ -33,14 +33,13 @@ pub struct StreamContext {
     pub input_tokens: i32,
     /// 从 contextUsageEvent 计算的实际输入 tokens
     pub context_input_tokens: Option<i32>,
-    /// 计费口径的输出字符累计（含 thinking），中文桶。见 `output_tokens()`
-    pub output_chars_cn: i64,
-    /// 计费口径的输出字符累计（含 thinking），非中文桶
-    pub output_chars_other: i64,
-    /// 上报口径的输出字符累计（不含 thinking），中文桶。见 `visible_output_tokens()`
-    pub visible_chars_cn: i64,
-    /// 上报口径的输出字符累计（不含 thinking），非中文桶
-    pub visible_chars_other: i64,
+    /// 计费口径的输出全文缓冲（含 thinking），收尾一次性 BPE 编码。见 `output_tokens()`
+    pub output_full_text: String,
+    /// 上报口径的输出全文缓冲（不含 thinking），收尾一次性 BPE 编码。见 `visible_output_tokens()`
+    pub visible_full_text: String,
+    /// 客户端实际收到的 thinking 全文缓存（BPE 真值统计口径，
+    /// 落库时一次性 count_tokens）。见 `thinking_token_count()`
+    pub thinking_full_text: String,
     /// 工具块索引映射 (tool_id -> block_index)
     pub tool_block_indices: HashMap<String, i32>,
     /// thinking 是否启用
@@ -71,10 +70,14 @@ pub struct StreamContext {
     credential_id: Option<u64>,
     /// 客户端 IP（用于用量记录）
     client_ip: Option<String>,
+    /// 客户端 User-Agent（用于用量记录）
+    user_agent: Option<String>,
     /// 模拟出的 prompt cache usage
     prompt_cache_usage: PromptCacheUsage,
     /// 从 meteringEvent 获取的真实 credits 消耗
     pub metering_usage: Option<f64>,
+    /// 已成功接入桥接续流，累计输出不能与末轮积分用于反推。
+    has_continuation: bool,
     /// 从 meteringEvent 获取的 cache read tokens（Kiro 透传时有值）
     metering_cache_read_tokens: Option<i32>,
     /// 从 meteringEvent 获取的 cache creation tokens（Kiro 透传时有值）
@@ -86,12 +89,24 @@ pub struct StreamContext {
     /// `Some(0)` 表示"已估算且无前缀"（首条请求且无 system/tools），cache_read=0；
     /// `None` 表示"未注入估算"，降级到模拟值。
     prefix_estimated_tokens: Option<i32>,
+    /// 断点缓存记账（promptCacheAccounting 开启时注入）—— 优先级高于前缀估算
+    cache_accounting: Option<crate::cache::breakpoint::CacheAccounting>,
     /// 请求的 effort 级别（output_config 存在时取值），随 usage 记录入库
     effort: Option<String>,
     /// 思考文本化转换器（None = 关闭，出站事件原样输出）
     thinking_text: Option<crate::anthropic::stream::ThinkingTextRewriter>,
     /// 响应前缀防护：剔除模型偶发回声用户 `<system-reminder>` 块的情况（见模块文档）
     echo_guard: super::echo_guard::ResponseEchoGuard,
+    /// 请求计时起点（进入 handler 时注入；None = 未注入，落库时不计耗时）
+    pub(crate) request_started_at: Option<Instant>,
+    /// 首个上游业务事件时刻（keepalive 不计；None = 尚未收到或未注入起点）
+    pub(crate) first_token_at: Option<Instant>,
+    /// 会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
+    conversation_id: Option<String>,
+    /// 会话结束时追加 credits 汇总行（None = 关闭）
+    credits_footer: Option<crate::anthropic::stream::CreditsFooterRequest>,
+    /// 本请求的 credits 是否已计入会话累计（重复收尾不得重复记账、重复追加汇总行）
+    credits_recorded: bool,
 }
 
 impl StreamContext {
@@ -108,10 +123,9 @@ impl StreamContext {
             message_id: format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
             input_tokens,
             context_input_tokens: None,
-            output_chars_cn: 0,
-            output_chars_other: 0,
-            visible_chars_cn: 0,
-            visible_chars_other: 0,
+            output_full_text: String::new(),
+            visible_full_text: String::new(),
+            thinking_full_text: String::new(),
             tool_block_indices: HashMap::new(),
             thinking_enabled,
             thinking_buffer: String::new(),
@@ -127,15 +141,62 @@ impl StreamContext {
             api_key_id: None,
             credential_id: None,
             client_ip: None,
+            user_agent: None,
             prompt_cache_usage: PromptCacheUsage::uncached(input_tokens),
             metering_usage: None,
+            has_continuation: false,
             metering_cache_read_tokens: None,
             metering_cache_creation_tokens: None,
             context_usage_percentage: None,
             prefix_estimated_tokens: None,
+            cache_accounting: None,
             effort: None,
             echo_guard: super::echo_guard::ResponseEchoGuard::new(),
+            request_started_at: None,
+            first_token_at: None,
+            conversation_id: None,
+            credits_footer: None,
+            credits_recorded: false,
         }
+    }
+
+    /// 注入请求计时起点（进入 handler 时调用；首个客户端可见 SSE 产出时计算首字延迟）
+    pub fn with_request_started_at(mut self, started_at: Instant) -> Self {
+        self.request_started_at = Some(started_at);
+        self
+    }
+
+    /// 注入会话 conversationId（cache-miss 诊断按会话计算结算间隔与凭据变化）
+    pub fn with_conversation_id(mut self, conversation_id: Option<String>) -> Self {
+        self.conversation_id = conversation_id;
+        self
+    }
+
+    /// 开启会话结束时的 credits 汇总行；需要已注入 conversationId（用于按会话累计）。
+    /// 同时登记本请求的开始，新一轮会清零 turn 累计并以 `started_at` 作为 Time 起点。
+    pub fn with_credits_footer(
+        mut self,
+        request: Option<crate::anthropic::stream::CreditsFooterRequest>,
+        started_at: Instant,
+    ) -> Self {
+        if let (Some(req), Some(conv)) = (request, self.conversation_id.as_deref()) {
+            crate::anthropic::stream::begin_request(conv, req.new_turn, started_at);
+            self.credits_footer = Some(req);
+        }
+        self
+    }
+
+    /// 标记首个客户端可见 SSE 产出的时刻（幂等：仅首次调用生效；空输出帧与
+    /// keepalive 不经过此路径，调用侧按「本帧是否产出非空 SSE 事件」判定）
+    pub fn mark_first_token(&mut self) {
+        if self.first_token_at.is_none() {
+            self.first_token_at = Some(Instant::now());
+        }
+    }
+
+    /// 仅供内部诊断关联空流等错误，不向客户端响应增加账号信息。
+    pub(crate) fn credential_id(&self) -> Option<u64> {
+        self.credential_id
     }
 
     /// 设置 prompt cache usage
@@ -151,14 +212,30 @@ impl StreamContext {
         self
     }
 
+    pub(crate) fn mark_continuation(&mut self) {
+        self.has_continuation = true;
+    }
+
+    /// 注入断点缓存记账（None 时维持前缀估算路径）
+    pub fn with_cache_accounting(
+        mut self,
+        accounting: Option<crate::cache::breakpoint::CacheAccounting>,
+    ) -> Self {
+        self.cache_accounting = accounting;
+        self
+    }
+
     /// 开启思考文本化：出站 SSE 的 thinking 块改写为 text 块（见 `thinking_text` 模块）
-    pub fn with_thinking_as_text(mut self, enabled: bool) -> Self {
-        self.thinking_text = enabled.then(crate::anthropic::stream::ThinkingTextRewriter::new);
+    pub fn with_thinking_as_text(
+        mut self,
+        style: Option<crate::anthropic::stream::ThinkingTextStyle>,
+    ) -> Self {
+        self.thinking_text = style.map(crate::anthropic::stream::ThinkingTextRewriter::with_style);
         self
     }
 
     /// 出站事件统一经此处理：开启文本化时改写 thinking 块，否则原样返回
-    fn render_outbound(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
+    pub(crate) fn render_outbound(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
         match self.thinking_text.as_mut() {
             Some(rewriter) => rewriter.rewrite(events),
             None => events,
@@ -178,11 +255,13 @@ impl StreamContext {
         api_key_id: Option<u32>,
         credential_id: Option<u64>,
         client_ip: Option<String>,
+        user_agent: Option<String>,
     ) -> Self {
         self.usage_tracker = tracker;
         self.api_key_id = api_key_id;
         self.credential_id = credential_id;
         self.client_ip = client_ip;
+        self.user_agent = user_agent;
         self
     }
 
@@ -195,18 +274,44 @@ impl StreamContext {
     ///
     /// 优先级：
     ///   1. Kiro metering 透传 cache_read/creation（实测当前版本不透传，保留兜底；
-    ///      message_start 阶段 metering 事件尚未到达，天然落到 2）
-    ///   2. 前缀估算 prefix_estimated_tokens.min(input_tokens)  ← 主路径
-    ///   3. PromptCacheUsage 模拟值（仅当前缀未注入）
-    pub(crate) fn derive_report_cache_usage(&self, input_tokens: i32) -> (i32, i32, i32) {
+    ///      message_start 阶段 metering 事件尚未到达，天然落到 2/3）
+    ///   2. 断点缓存记账 cache_accounting（promptCacheAccounting 开启时）
+    ///   3. 前缀估算混合校准 refine_prefix_cache_read（credits_used 仅传入落库路径）← 主路径
+    ///   4. PromptCacheUsage 模拟值（仅当前缀未注入）
+    ///
+    /// `billed_output_tokens` 由调用方传入（BPE 全文编码 O(n)，收尾路径算一次复用，
+    /// 避免重复编码；message_start 阶段传 0 —— 彼时全文为空，编码结果本就是 0）。
+    pub(crate) fn derive_report_cache_usage(
+        &self,
+        input_tokens: i32,
+        credits_used: Option<f64>,
+        billed_output_tokens: i32,
+    ) -> (i32, i32, i32) {
         if let (Some(read), Some(creation)) = (
             self.metering_cache_read_tokens,
             self.metering_cache_creation_tokens,
         ) {
             let non_cached = input_tokens.saturating_sub(read).saturating_sub(creation);
             (non_cached, creation, read)
+        } else if let Some(acc) = &self.cache_accounting {
+            let u = acc.usage_for(input_tokens);
+            (
+                u.input_tokens,
+                u.cache_creation_input_tokens,
+                u.cache_read_input_tokens,
+            )
         } else if let Some(prefix) = self.prefix_estimated_tokens {
-            let read = prefix.max(0).min(input_tokens);
+            let read = crate::model::usage::refine_prefix_cache_read(
+                &self.model,
+                prefix,
+                input_tokens,
+                billed_output_tokens,
+                if self.has_continuation {
+                    None
+                } else {
+                    credits_used
+                },
+            );
             (input_tokens.saturating_sub(read), 0, read)
         } else {
             let sim = self.prompt_cache_usage.scale_to(input_tokens);
@@ -222,7 +327,8 @@ impl StreamContext {
     pub fn create_message_start_event(&self) -> serde_json::Value {
         // 与末尾 message_delta 共用派生逻辑，避免 cache_* 口径不一致
         let input = cap_input_tokens(self.input_tokens, self.input_tokens, &self.model);
-        let (non_cached, cache_creation, cache_read) = self.derive_report_cache_usage(input);
+        let (non_cached, cache_creation, cache_read) =
+            self.derive_report_cache_usage(input, None, 0);
         json!({
             "type": "message_start",
             "message": {
@@ -382,10 +488,9 @@ impl StreamContext {
             return Vec::new();
         }
 
-        // 累加字符数而非 token —— 取整统一留到 output_tokens() 收尾做一次
-        let (cn, other) = count_token_chars(content);
-        self.output_chars_cn += cn;
-        self.output_chars_other += other;
+        // 缓冲全文而非逐段编码 —— BPE 统一留到 output_tokens() 收尾做一次：
+        // 跨 chunk 的 BPE 合并（如标签 `<th` + `inking>`）无法拆开分段累加
+        self.output_full_text.push_str(content);
 
         let mut events = self.finish_native_thinking();
         // 如果启用了thinking，需要处理thinking块
@@ -603,17 +708,63 @@ impl StreamContext {
             }),
         ) {
             // 只统计真正发出的文本 —— 被状态机拒绝的 delta 客户端收不到，不应计入上报
-            let (cn, other) = count_token_chars(text);
-            self.visible_chars_cn += cn;
-            self.visible_chars_other += other;
+            self.visible_full_text.push_str(text);
             events.push(delta_event);
         }
 
         events
     }
 
+    /// credits 汇总行：登记本请求的 credits，并在对话真正结束（end_turn）时把累计值
+    /// 作为最后一行文本追加到回复末尾。
+    ///
+    /// - 每个带 metering 的请求都计入 turn / session 累计，包括以 tool_use 结束的中间请求；
+    ///   只有 end_turn 且已有可见正文时才输出汇总行
+    /// - 汇总行不计入 `visible_full_text`：它不是模型输出，不能进入 output_tokens 上报与计费口径
+    fn credits_footer_events(&mut self) -> Vec<SseEvent> {
+        let (Some(footer), Some(conv), Some(credits)) = (
+            self.credits_footer,
+            self.conversation_id.as_deref(),
+            self.metering_usage,
+        ) else {
+            return Vec::new();
+        };
+        // 与 message_ended 同口径：桥接兜底路径可能再次收尾，只记账一次
+        if self.credits_recorded {
+            return Vec::new();
+        }
+        self.credits_recorded = true;
+        let snapshot = crate::anthropic::stream::record_credits(conv, credits);
+        if self.state_manager.get_stop_reason() != "end_turn" || self.visible_full_text.is_empty() {
+            return Vec::new();
+        }
+        let text = crate::anthropic::stream::render_footer(
+            &snapshot,
+            footer.style,
+            &self.visible_full_text,
+        );
+        let visible_len = self.visible_full_text.len();
+        let events = self.create_text_delta_events(&text);
+        self.visible_full_text.truncate(visible_len);
+        events
+    }
+
+    /// 客户端可见 thinking 文案入缓存（落库 thinking_token_count 统计口径）；
+    /// 空串跳过（content_block_stop 前的收尾空事件不计数）。
+    /// 流式两条发射路径（标签解析 / native reasoning）统一经此收敛，防第三发射点遗漏。
+    pub(super) fn accumulate_thinking(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.thinking_full_text.push_str(text);
+        }
+    }
+
     /// 创建 thinking_delta 事件
-    fn create_thinking_delta_event(&self, index: i32, thinking: &str) -> SseEvent {
+    ///
+    /// 非空内容同时写入 thinking 全文缓存（落库为 thinking_token_count 的统计口径：
+    /// 客户端实际收到的 thinking 文案 BPE 真值，与 visible_full_text 同语义）；空串事件（
+    /// content_block_stop 前的收尾）不计数。
+    fn create_thinking_delta_event(&mut self, index: i32, thinking: &str) -> SseEvent {
+        self.accumulate_thinking(thinking);
         SseEvent::new(
             "content_block_delta",
             json!({
@@ -718,11 +869,9 @@ impl StreamContext {
 
         // 发送参数增量 (ToolUseEvent.input 是 String 类型)
         if !tool_use.input.is_empty() {
-            // tool input 是 JSON，整体归入非中文桶（与原 `(len+3)/4` 同口径，去掉逐次取整）
-            let tool_input_chars = tool_use.input.len() as i64;
             // 计费口径与 text 分支一致（`process_assistant_response` 也是无条件累加）：
             // 上游已生成这段内容即已计费，代理侧状态机是否转发不改变上游成本。
-            self.output_chars_other += tool_input_chars;
+            self.output_full_text.push_str(&tool_use.input);
 
             if let Some(delta_event) = self.state_manager.handle_content_block_delta(
                 block_index,
@@ -737,7 +886,7 @@ impl StreamContext {
             ) {
                 // 上报口径只统计真正发出的内容 —— 被状态机拒绝的 delta 客户端收不到
                 // （如同一 tool_use_id 在 stop 之后又收到迟到帧）。
-                self.visible_chars_other += tool_input_chars;
+                self.visible_full_text.push_str(&tool_use.input);
                 events.push(delta_event);
             }
         }
@@ -800,10 +949,11 @@ impl StreamContext {
                     }
                 } else {
                     // 如果还在 thinking 块内，发送剩余内容作为 thinking_delta
+                    // （mem::take 解借用冲突：参数与 &mut self 同源；该分支块末
+                    // self.thinking_buffer.clear() 无条件清空，take 后无需还回）
                     if let Some(thinking_index) = self.thinking_block_index {
-                        events.push(
-                            self.create_thinking_delta_event(thinking_index, &self.thinking_buffer),
-                        );
+                        let buffer = std::mem::take(&mut self.thinking_buffer);
+                        events.push(self.create_thinking_delta_event(thinking_index, &buffer));
                     }
                     // 关闭 thinking 块：先发送空的 thinking_delta，再发送 content_block_stop
                     if let Some(thinking_index) = self.thinking_block_index {
@@ -838,6 +988,8 @@ impl StreamContext {
             events.extend(self.create_text_delta_events(" "));
         }
 
+        events.extend(self.credits_footer_events());
+
         // contextUsage 本地化：input_tokens 来源改为 metering 真值 → 本地估算（self.input_tokens）
         // self.context_input_tokens 已弃用（始终为 None），保留诊断字段
         let raw_final_input_tokens = self.input_tokens;
@@ -856,15 +1008,46 @@ impl StreamContext {
             final_input_tokens
         );
 
-        // 对客户端上报「可见输出」token（已排除 thinking），不再套用固定上限
-        let reported_output_tokens = self.visible_output_tokens();
         // 计费口径（含 thinking），派生一次复用
         let billed_output_tokens = self.output_tokens();
+        // 对客户端上报：默认「可见输出」（已排除 thinking）；outputTokensIncludeThinking
+        // 开启时与官方口径一致，上报含 thinking 的计费值
+        let reported_output_tokens = if crate::anthropic::stream::output_tokens_include_thinking() {
+            billed_output_tokens
+        } else {
+            self.visible_output_tokens()
+        };
 
-        // 派生逻辑见 derive_report_cache_usage（与 message_start 共用同一口径）
+        // message_delta 与 message_start 共用静态口径；UsageTracker 落库采用 creditsUsed 校准值
         let (report_input, cache_creation, cache_read) =
-            self.derive_report_cache_usage(final_input_tokens);
+            self.derive_report_cache_usage(final_input_tokens, None, billed_output_tokens);
+        let (_, _, tracked_read) = self.derive_report_cache_usage(
+            final_input_tokens,
+            self.metering_usage,
+            billed_output_tokens,
+        );
         let (report_cache_creation, report_cache_read) = (Some(cache_creation), Some(cache_read));
+        let tracked_cache_read = Some(tracked_read);
+
+        // cache-miss 诊断：credits 反推实际生效（metering 真值未透传、无断点账本、
+        // 非桥接续流）且命中率低于阈值时输出，量化本次结算并登记会话注册表
+        crate::cache::cache_miss_diag::maybe_log(
+            self.conversation_id.as_deref().unwrap_or(""),
+            &self.model,
+            self.prefix_estimated_tokens.unwrap_or(0),
+            final_input_tokens,
+            billed_output_tokens,
+            self.metering_usage,
+            // 与 derive_report_cache_usage 同口径：read+creation 双 Some 才算完整
+            // metering 真值（任一缺失则反推实际生效，诊断不应被关闭）
+            (self.metering_cache_read_tokens.is_none()
+                || self.metering_cache_creation_tokens.is_none())
+                && self.cache_accounting.is_none()
+                && self.prefix_estimated_tokens.is_some()
+                && !self.has_continuation,
+            self.credential_id.unwrap_or(0),
+            self.request_started_at.unwrap_or_else(Instant::now),
+        );
 
         // 记录用量（内部记录使用真实值）
         if let (Some(tracker), Some(key_id)) = (&self.usage_tracker, self.api_key_id) {
@@ -887,28 +1070,64 @@ impl StreamContext {
                 self.metering_usage,
                 credits_per_ktok,
                 effective_rate,
-                report_cache_read,
+                tracked_cache_read,
                 report_cache_creation,
                 key_id,
                 self.credential_id
             );
+            // 计时口径：first_token_ms = 起点 → 首个客户端可见 SSE 产出（空输出帧
+            // 与 keepalive 不计）；duration_ms = 起点 → 落库前。
+            // 起点未注入（None）时二者均不计（等价旧数据）
+            let (first_token_ms, duration_ms) = match self.request_started_at {
+                Some(started) => (
+                    self.first_token_at
+                        .map(|t| (t - started).as_millis() as u64),
+                    Some((Instant::now() - started).as_millis() as u64),
+                ),
+                None => (None, None),
+            };
+            // 无 thinking 时落 None，与「None = 未产生思考」语义统一（非流式同口径）
+            let thinking_tokens = self.thinking_token_count();
             tracker.record(
                 key_id,
-                self.credential_id,
                 self.model.clone(),
                 final_input_tokens,
                 billed_output_tokens,
-                self.client_ip.clone(),
-                self.metering_usage,
-                report_cache_read,
-                report_cache_creation,
-                self.effort.clone(),
+                crate::model::usage::RecordOptions {
+                    credential_id: self.credential_id,
+                    client_ip: self.client_ip.clone(),
+                    credits_used: self.metering_usage,
+                    cache_read_input_tokens: tracked_cache_read,
+                    cache_creation_input_tokens: report_cache_creation,
+                    effort: self.effort.clone(),
+                    first_token_ms,
+                    duration_ms,
+                    thinking_token_count: (thinking_tokens > 0).then_some(thinking_tokens),
+                    is_stream: Some(true),
+                    user_agent: self.user_agent.clone(),
+                },
             );
         }
-        // 流式 SSE 路径暂未接入 fingerprint，cache_creation 不区分 5m/1h tier，
-        // 这里把 report_cache_creation 全部归到 5m（与非流式 metering Layer 1 一致）
-        let report_creation_5m = report_cache_creation;
-        let report_creation_1h = Some(0);
+        // 断点记账：响应已完整产出，提交本请求的缓存写入；5m/1h 按断点 ttl 拆分。
+        // 未开启时 cache_creation 全部归到 5m（与非流式 metering Layer 1 一致）
+        // 本地写入的提交与上报口径解耦：即便本次用 metering 真值上报也要提交，
+        // 否则后续请求回落到本地模拟时（如换到不返回缓存字段的端点）读不到这次的前缀
+        if let Some(acc) = &self.cache_accounting {
+            acc.commit();
+        }
+        let (report_creation_5m, report_creation_1h) = match &self.cache_accounting {
+            Some(acc)
+                if self.metering_cache_read_tokens.is_none()
+                    || self.metering_cache_creation_tokens.is_none() =>
+            {
+                let u = acc.usage_for(final_input_tokens);
+                (
+                    Some(u.cache_creation_5m_input_tokens),
+                    Some(u.cache_creation_1h_input_tokens),
+                )
+            }
+            _ => (report_cache_creation, Some(0)),
+        };
 
         events.extend(self.state_manager.generate_final_events(
             report_input,

@@ -492,6 +492,54 @@ fn test_rendered_thinking_header_stripped_from_assistant_history() {
 }
 
 #[test]
+fn test_credits_footer_stripped_from_assistant_history() {
+    // showSessionCredits 开启时，客户端会把末尾的汇总行当正文回传；
+    // 回传上游前必须剥掉（ANSI 与 Markdown 两种样式），且保持历史逐字节等同于没有汇总行
+    use crate::anthropic::types::{Message as AnthropicMessage, MessagesRequest};
+    let build = |assistant_text: &str| MessagesRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        max_tokens: 2048,
+        messages: vec![
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("q1"),
+            },
+            AnthropicMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!([{"type": "text", "text": assistant_text}]),
+            },
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("q2"),
+            },
+        ],
+        stream: false,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        output_config: None,
+        metadata: None,
+    };
+    let history_of = |text: &str| {
+        let r = convert_request(&build(text)).unwrap();
+        serde_json::to_string(&r.conversation_state.history).unwrap()
+    };
+
+    let clean = history_of("最终答案");
+    let ansi =
+        history_of("最终答案\n\n\u{1b}[2m▸ Credits: turn 0.86 • session 8.73 | Time: 12s\u{1b}[0m");
+    let plain = history_of("最终答案\n\n*▸ Credits: turn 0.86 • session 8.73 | Time: 12s*");
+
+    assert!(clean.contains("最终答案"));
+    assert!(!ansi.contains("Credits:"), "{ansi}");
+    assert!(!plain.contains("Credits:"), "{plain}");
+    // 历史逐字节稳定：prompt cache 不会因汇总行失效
+    assert_eq!(ansi, clean);
+    assert_eq!(plain, clean);
+}
+
+#[test]
 fn test_rendered_thinking_block_fully_dropped_from_assistant_history() {
     // 完整的文本化思考块（标记行 + 正文 + 时长行）整块不回传上游；
     // 思考块后的答案与工具调用保留，纯思考 + 工具调用的消息不会留下空 content
@@ -700,4 +748,259 @@ fn test_code_example_with_literal_dim_line_survives_history() {
     let expected = serde_json::to_string(answer).unwrap();
     let expected = &expected[1..expected.len() - 1];
     assert!(hist.contains(expected), "{hist}");
+}
+
+/// 带 tools 的请求：复用 reminder_request 的基础字段，再换上指定的 tools
+fn request_with_tools(messages: serde_json::Value, tools: serde_json::Value) -> MessagesRequest {
+    MessagesRequest {
+        tools: Some(serde_json::from_value(tools).unwrap()),
+        ..reminder_request(Some("TOP"), messages)
+    }
+}
+
+#[test]
+fn test_inline_system_skips_tool_change_events_and_keeps_text() {
+    // advisor 开启后 Claude Code 会在内联 system 里放 tool_addition / tool_removal：
+    // 事件被跳过，同一条消息里的 text 照常保留，不再整次请求 400
+    let req = reminder_request(
+        Some("TOP"),
+        serde_json::json!([
+            {"role": "user", "content": "first"},
+            {"role": "system", "content": [
+                {"type": "text", "text": "原有系统说明"},
+                {"type": "tool_addition",
+                 "tool": {"type": "tool_reference", "name": "advisor"},
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "advisor"}}
+            ]},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "current"}
+        ]),
+    );
+    let result = convert_request(&req).expect("工具变更事件不应导致转换失败");
+    assert_eq!(system_history(&result), "TOP\n原有系统说明");
+}
+
+#[test]
+fn test_inline_system_with_only_tool_change_event_adds_no_text() {
+    let with_event = reminder_request(
+        Some("TOP"),
+        serde_json::json!([
+            {"role": "user", "content": "first"},
+            {"role": "system", "content": [{"type": "tool_addition", "tool": {"name": "x"}}]},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "current"}
+        ]),
+    );
+    let without_event = reminder_request(
+        Some("TOP"),
+        serde_json::json!([
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "current"}
+        ]),
+    );
+    let a = convert_request(&with_event).unwrap();
+    let b = convert_request(&without_event).unwrap();
+    assert_eq!(system_history(&a), system_history(&b));
+    assert_eq!(
+        a.conversation_state.history.len(),
+        b.conversation_state.history.len()
+    );
+}
+
+#[test]
+fn test_advisor_server_tool_is_not_forwarded_but_same_named_user_tool_is() {
+    let messages = serde_json::json!([{"role": "user", "content": "hi"}]);
+    // 带 advisor_* type 的服务端工具被剔除，普通工具保留
+    let req = request_with_tools(
+        messages.clone(),
+        serde_json::json!([
+            {"type": "advisor_20260301", "name": "advisor", "defer_loading": true,
+             "model": "claude-opus-4-6"},
+            {"name": "Read", "description": "read", "input_schema": {"type": "object"}}
+        ]),
+    );
+    let result = convert_request(&req).unwrap();
+    let names: Vec<_> = result
+        .conversation_state
+        .current_message
+        .user_input_message
+        .user_input_message_context
+        .tools
+        .iter()
+        .map(|t| t.tool_specification.name.as_str())
+        .collect();
+    assert_eq!(names, ["Read"]);
+
+    // 用户自己定义、恰好叫 advisor 的普通工具（无 advisor_* type）不能被误伤
+    let req = request_with_tools(
+        messages,
+        serde_json::json!([
+            {"name": "advisor", "description": "my own", "input_schema": {"type": "object"}}
+        ]),
+    );
+    let result = convert_request(&req).unwrap();
+    assert_eq!(
+        result
+            .conversation_state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tools
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_tool_change_event_only_inline_system_keeps_thinking_prefix_without_top_level_system() {
+    // 没有顶层 system、内联 system 只有被跳过的工具变更事件时，应与「没有 system」一致：
+    // thinking 前缀照常注入，而不是因为空的 system 区被漏掉
+    let build = |with_event: bool| {
+        let mut messages = vec![serde_json::json!({"role": "user", "content": "first"})];
+        if with_event {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": [{"type": "tool_addition", "tool": {"name": "advisor"}}]
+            }));
+        }
+        messages.push(serde_json::json!({"role": "assistant", "content": "reply"}));
+        messages.push(serde_json::json!({"role": "user", "content": "current"}));
+        let mut req = reminder_request(None, serde_json::json!(messages));
+        req.thinking = Some(crate::anthropic::types::Thinking {
+            thinking_type: "enabled".to_string(),
+            budget_tokens: 4096,
+        });
+        convert_request(&req).unwrap()
+    };
+    let with_event = build(true);
+    let without_event = build(false);
+    assert!(
+        system_history(&without_event).contains("thinking"),
+        "基线应注入 thinking 前缀"
+    );
+    assert_eq!(system_history(&with_event), system_history(&without_event));
+    assert_eq!(
+        with_event.conversation_state.history.len(),
+        without_event.conversation_state.history.len()
+    );
+}
+
+/// 会话中途新增系统块（如按路径加载的 rules）不得改变 history[0]，内容改放当前消息；
+/// 文本不匹配任何已知动态前缀也一样。
+#[test]
+fn test_system_block_added_mid_session_is_diverted_from_history_zero() {
+    use crate::anthropic::types::{Message as AnthropicMessage, Metadata, SystemMessage};
+
+    let base = [
+        format!("base-identity {}", "i".repeat(2000)),
+        format!("base-rules {}", "r".repeat(2000)),
+        format!("base-env {}", "e".repeat(2000)),
+    ];
+    let late_rule = format!(
+        "Contents of /home/u/.claude/rules/ts/style.md:\n\n{}",
+        "s".repeat(400)
+    );
+
+    let make_req = |blocks: Vec<&str>| MessagesRequest {
+        model: "claude-sonnet-4".to_string(),
+        max_tokens: 1024,
+        messages: vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: serde_json::json!("go"),
+        }],
+        stream: false,
+        system: Some(
+            blocks
+                .into_iter()
+                .map(|text| SystemMessage {
+                    text: text.to_string(),
+                })
+                .collect(),
+        ),
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        output_config: None,
+        metadata: Some(Metadata {
+            user_id: Some("user_account__session_5a1c0e22-7d3b-4f6a-8c19-0b2d4e6f8a10".to_string()),
+        }),
+    };
+    let current_text = |r: &ConversionResult| {
+        r.conversation_state
+            .current_message
+            .user_input_message
+            .content
+            .clone()
+    };
+
+    let first = convert_request(&make_req(base.iter().map(String::as_str).collect())).unwrap();
+    // 新块插在中间，而不是末尾
+    let with_rule =
+        convert_request(&make_req(vec![&base[0], &base[1], &late_rule, &base[2]])).unwrap();
+
+    assert_eq!(system_history(&first), system_history(&with_rule));
+    assert!(!system_history(&with_rule).contains("Contents of /home"));
+    assert!(current_text(&with_rule).contains("Contents of /home/u/.claude/rules/ts/style.md"));
+    assert!(!current_text(&first).contains("Contents of"));
+}
+
+#[test]
+fn prefix_cached_is_false_on_first_turn_and_true_on_subsequent_turns() {
+    use crate::anthropic::types::{Message as AnthropicMessage, Metadata, SystemMessage};
+
+    let session = Some(Metadata {
+        user_id: Some("user_account__session_9e4a1b2c-3d5f-4a7e-8b9c-1d2e3f4a5b6c".to_string()),
+    });
+    let make_req = |sys: &str, msgs: Vec<(&str, &str)>| MessagesRequest {
+        model: "claude-haiku-5-5".to_string(),
+        max_tokens: 1024,
+        messages: msgs
+            .into_iter()
+            .map(|(role, text)| AnthropicMessage {
+                role: role.to_string(),
+                content: serde_json::json!(text),
+            })
+            .collect(),
+        stream: true,
+        system: Some(vec![SystemMessage {
+            text: sys.to_string(),
+        }]),
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        output_config: None,
+        metadata: session.clone(),
+    };
+
+    // 1. 新窗口第一条消息：history_end_index == 0 且 history[0] first → prefix_cached 必为 false
+    let turn1 = convert_request(&make_req("system prompt v1", vec![("user", "hi")])).unwrap();
+    assert!(!turn1.prefix_cached);
+
+    // 2. 单条消息重发：虽然 PREV_H0 已登记，但无历史对话轮次 → 仍为 false
+    let turn1_retry = convert_request(&make_req("system prompt v1", vec![("user", "hi")])).unwrap();
+    assert!(!turn1_retry.prefix_cached);
+
+    // 3. 第二轮对话：存在历史轮次且 history[0] 命中 frozen → prefix_cached 为 true
+    let turn2 = convert_request(&make_req(
+        "system prompt v1",
+        vec![("user", "hi"), ("assistant", "hello"), ("user", "next")],
+    ))
+    .unwrap();
+    assert!(turn2.prefix_cached);
+
+    // 4. 系统提示被改写导致 history[0] 漂移重置（first）→ 当轮 prefix_cached 回落为 false
+    let turn3_reset = convert_request(&make_req(
+        "system prompt v2 rewritten",
+        vec![
+            ("user", "hi"),
+            ("assistant", "hello"),
+            ("user", "next"),
+            ("assistant", "ok"),
+            ("user", "after reset"),
+        ],
+    ))
+    .unwrap();
+    assert!(!turn3_reset.prefix_cached);
 }

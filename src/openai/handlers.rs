@@ -142,6 +142,9 @@ pub(crate) async fn post_responses(
     // custom 工具名要同时供流式与非流式转换使用，各持一份（集合很小，克隆成本可忽略）
     let custom_tools = converted.custom_tools;
     let stream_custom_tools = custom_tools.clone();
+    // 非默认 namespace 的工具映射，用途同上：响应侧据此还原 function_call 的 namespace 字段
+    let namespaced_tools = converted.namespaced_tools;
+    let stream_namespaced_tools = namespaced_tools.clone();
     let is_compaction = converted.is_compaction;
     forward_and_wrap(
         state,
@@ -153,22 +156,32 @@ pub(crate) async fn post_responses(
         client_model,
         move || {
             if is_compaction {
-                Box::new(ResponsesStreamConverter::new_compaction(
-                    &converter_model,
-                    stream_custom_tools,
-                ))
+                Box::new(
+                    ResponsesStreamConverter::new_compaction(&converter_model, stream_custom_tools)
+                        .with_namespaces(stream_namespaced_tools),
+                )
             } else {
-                Box::new(ResponsesStreamConverter::new(
-                    &converter_model,
-                    stream_custom_tools,
-                ))
+                Box::new(
+                    ResponsesStreamConverter::new(&converter_model, stream_custom_tools)
+                        .with_namespaces(stream_namespaced_tools),
+                )
             }
         },
         move |anthropic, model| {
             if is_compaction {
-                responses_response::convert_non_stream_compaction(anthropic, model, &custom_tools)
+                responses_response::convert_non_stream_compaction(
+                    anthropic,
+                    model,
+                    &custom_tools,
+                    &namespaced_tools,
+                )
             } else {
-                responses_response::convert_non_stream(anthropic, model, &custom_tools)
+                responses_response::convert_non_stream(
+                    anthropic,
+                    model,
+                    &custom_tools,
+                    &namespaced_tools,
+                )
             }
         },
     )
@@ -213,7 +226,14 @@ async fn forward_and_wrap(
 
     if !status.is_success() {
         let bytes = read_body(upstream_body).await;
-        return (status, Json(error::convert_error_body(status, &bytes))).into_response();
+        let mut response =
+            (status, Json(error::convert_error_body(status, &bytes))).into_response();
+        if let Some(retry_after) = parts.headers.get(header::RETRY_AFTER) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after.clone());
+        }
+        return response;
     }
 
     if stream {
@@ -247,8 +267,16 @@ fn forward_to_anthropic(
     headers: HeaderMap,
     anthropic_body: &Value,
 ) -> impl std::future::Future<Output = Response> + use<> {
+    // OpenAI 协议是自动前缀缓存：断点记账开启时补顶层自动缓存标记（见 ensure_auto_cache_control）
+    // 只有开启时才需要可变副本；默认关闭路径不做整包深拷贝
     // Value 一定可序列化，unwrap_or_default 只为避免 panic 路径
-    let bytes = Bytes::from(serde_json::to_vec(anthropic_body).unwrap_or_default());
+    let bytes = if state.breakpoint_cache.is_some() {
+        let mut owned = anthropic_body.clone();
+        crate::cache::breakpoint::ensure_auto_cache_control(&mut owned);
+        Bytes::from(serde_json::to_vec(&owned).unwrap_or_default())
+    } else {
+        Bytes::from(serde_json::to_vec(anthropic_body).unwrap_or_default())
+    };
     post_messages(State(state), identity, ConnectInfo(addr), headers, bytes)
 }
 
@@ -359,4 +387,70 @@ fn stream_openai_response(body: Body, converter: Box<dyn StreamConverter + Send>
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(out))
         .expect("构造 SSE 响应不会失败")
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+    use crate::kiro::model::credentials::KiroCredentials;
+    use crate::kiro::provider::KiroProvider;
+    use crate::kiro::token_manager::MultiTokenManager;
+    use crate::model::config::Config;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn both_openai_protocols_preserve_rate_limit_status_and_retry_after() {
+        for responses in [false, true] {
+            let config: Config = serde_json::from_value(json!({"maxRpmPerCredential":1})).unwrap();
+            let manager = MultiTokenManager::new(
+                config,
+                vec![KiroCredentials {
+                    id: Some(1),
+                    access_token: Some("synthetic-access".to_string()),
+                    refresh_token: Some("synthetic-refresh".repeat(10)),
+                    expires_at: Some(
+                        (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    ),
+                    auth_method: Some("social".to_string()),
+                    ..Default::default()
+                }],
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+            let mut provider = KiroProvider::new(Arc::new(manager));
+            // 即使门禁回归，也只会访问本机未使用端口，绝不调用真实提供商。
+            provider.upstream_url_override = Some("http://127.0.0.1:9/".to_string());
+            provider
+                .rpm_tracker
+                .as_ref()
+                .unwrap()
+                .try_admit_credential(1, 1)
+                .unwrap();
+            let state = AppState::new().with_kiro_provider(provider);
+            let request = if responses {
+                json!({"model":"claude-sonnet-4-5","input":"Hello"})
+            } else {
+                json!({"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Hello"}]})
+            };
+            let body = Bytes::from(serde_json::to_vec(&request).unwrap());
+            let address = ConnectInfo("127.0.0.1:10000".parse().unwrap());
+            let response = if responses {
+                post_responses(State(state), None, address, HeaderMap::new(), body).await
+            } else {
+                post_chat_completions(State(state), None, address, HeaderMap::new(), body).await
+            };
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let wait: u64 = response.headers()[header::RETRY_AFTER]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=60).contains(&wait));
+            let bytes = read_body(response.into_body()).await;
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"]["type"], "rate_limit_error");
+        }
+    }
 }

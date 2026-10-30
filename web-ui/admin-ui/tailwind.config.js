@@ -110,6 +110,38 @@ export default {
         panel: 'var(--shadow-md)',
         pop: 'var(--shadow-pop)',
       },
+      // 弹层进出场动画（未安装 tailwindcss-animate，自带关键帧）。
+      // Radix 在 data-state=closed 时会等待 animationend 再卸载，所以退场帧必须带 forwards，
+      // 避免动画结束到卸载之间闪回原状态。居中弹窗的 transform 必须在关键帧里重写完整的
+      // translate(-50%, -50%)，否则动画期间会丢失居中偏移。
+      keyframes: {
+        'overlay-in': { from: { opacity: '0' }, to: { opacity: '1' } },
+        'overlay-out': { from: { opacity: '1' }, to: { opacity: '0' } },
+        'dialog-in': {
+          from: { opacity: '0', transform: 'translate(-50%, calc(-50% + 12px)) scale(0.95)' },
+          to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+        },
+        'dialog-out': {
+          from: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+          to: { opacity: '0', transform: 'translate(-50%, calc(-50% + 8px)) scale(0.97)' },
+        },
+        'popover-in': {
+          from: { opacity: '0', transform: 'scale(0.95)' },
+          to: { opacity: '1', transform: 'scale(1)' },
+        },
+        'popover-out': {
+          from: { opacity: '1', transform: 'scale(1)' },
+          to: { opacity: '0', transform: 'scale(0.95)' },
+        },
+      },
+      animation: {
+        'overlay-in': 'overlay-in 200ms ease-out',
+        'overlay-out': 'overlay-out 150ms ease-in forwards',
+        'dialog-in': 'dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+        'dialog-out': 'dialog-out 150ms ease-in forwards',
+        'popover-in': 'popover-in 140ms ease-out',
+        'popover-out': 'popover-out 100ms ease-in forwards',
+      },
       fontFamily: {
         mono: ['"IBM Plex Mono"', '"JetBrains Mono"', 'Consolas', 'monospace'],
         sans: ['"IBM Plex Sans"', '"PingFang SC"', '"Hiragino Sans GB"', 'system-ui', 'sans-serif'],

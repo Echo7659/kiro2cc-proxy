@@ -2,8 +2,8 @@
 //! 更新日志静态数据
 //!
 //! 与 `build_model_list()`（`src/anthropic/handlers.rs`）同模式：编译期硬编码，
-//! 随代码发布同步维护。新增版本时在 `build_release_notes()` 顶部追加一条，
-//! 并将上一条的 `is_latest` 改回 `false`。
+//! 随代码发布同步维护。新增版本时在 `build_release_notes()` 顶部追加一条即可，
+//! `is_latest` 由 `CURRENT_VERSION` 与条目 `version` 自动比对设定，无需手工修改。
 
 /// 中英双语文案
 #[derive(Debug, Clone)]
@@ -66,6 +66,318 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// bump Cargo.toml 后无需手动改此标记。
 pub fn build_release_notes() -> Vec<ReleaseNote> {
     let mut notes = vec![
+        ReleaseNote {
+            version: "3.4.43".to_string(),
+            is_latest: false,
+            groups: vec![feat_group(vec![
+                Bilingual::new(
+                    "聊天回复末尾新增 turn/session credits 展示（showSessionCredits）：对话结束时把本次所耗与累计的 credits 一并呈现给用户",
+                    "The end of a chat reply now shows turn/session credits (showSessionCredits): on conversation end the credits consumed this turn and the running session total are presented to the user",
+                ),
+                Bilingual::new(
+                    "管理端弹窗与下拉菜单增加进出场动画，交互过渡更平滑",
+                    "The admin-side dialogs and dropdown menus now animate on open and close, making transitions smoother",
+                ),
+            ])],
+        },
+        ReleaseNote {
+            version: "3.4.42".to_string(),
+            is_latest: false,
+            groups: vec![feat_group(vec![Bilingual::new(
+                "账号管理与使用日志页切回浏览器标签页时自动刷新数据，避免长时间停留在页面后展示过期状态",
+                "The account-manager and usage-log pages now auto-refresh their data when the browser tab regains focus, so stale state is not shown after the page has been idle",
+            )])],
+        },
+        ReleaseNote {
+            version: "3.4.41".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "设置页「Kiro 请求体落盘取证」新增网页端浏览与下载：管理员可在弹窗中列出落盘文件、逐个下载或一键打包 ZIP 下载，容器化部署无需再通过 SSH / docker cp 取回；下载走 x-api-key 头鉴权，凭据不进查询参数。同时收紧了落盘文件的清理判据（仅识别规范命名的 dump 文件，手工放入的其他 json 不再被计数或删除）并为写入加锁，修复并发写入可能超出 200 个上限的竞态",
+                    "The Kiro request-body dump setting now offers in-browser browsing and download: admins can list dump files in a dialog, download them one by one or as a single ZIP, with no need for SSH / docker cp in containerised deployments. Downloads authenticate with the x-api-key header, so credentials never appear in query strings. The cleanup predicate is also tightened (only well-formed dump file names are recognised; hand-placed json files are no longer counted or deleted) and writes are serialised, fixing a race where concurrent writes could exceed the 200-file cap",
+                )]),
+                fix_group(vec![Bilingual::new(
+                    "修复编辑账号时 Client Secret 被浏览器自动填充的管理密码覆盖（#58）：登录页保存的管理密码会被填进弹窗里的 password 框，保存后被当作 clientSecret 写入，要等 token 到期刷新才报 invalid_client 并被禁用，且管理密码会随刷新请求发往 AWS。现在 password 输入框默认禁用浏览器与 1Password / LastPass / Bitwarden 的自动填充；后端在 clientId 或 IdC 账号的 clientSecret 改为非空新值时，先用更新后的配置（含同次提交的代理与区域）试刷新，失败则拒绝保存；更新日志记录涉及的字段名（不含值）。已被覆盖的账号需重新填入真实的 clientSecret",
+                    "Fixed the Client Secret being overwritten by a browser-autofilled admin password when editing an account (#58): the admin password saved from the login page was autofilled into password fields in the dialog and saved as clientSecret, only surfacing as invalid_client at the next token refresh (after which the account was disabled), and the admin password would be sent to AWS with each refresh. Password inputs now opt out of browser and 1Password / LastPass / Bitwarden autofill by default; when clientId, or clientSecret on an IdC account, is changed to a non-empty value the backend first trial-refreshes with the updated configuration (including a proxy or region changed in the same request) and rejects the save on failure; the update log now records the names of the fields involved (never values). Accounts already overwritten need their real clientSecret entered again",
+                )]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.40".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "输出 Tokens 口径由字符估算改为 tiktoken BPE 真值，与思考徽章同口径：修复「总输出 Token 数少于深度思考 Token 数」的矛盾（旧口径对思考内容按不同比例估算，导致两者难以直接比较）。流式与非流式桥接路径均已切换，工具调用参数一并计入",
+                        "Output token counting switched from character estimation to real tiktoken BPE values, sharing the same tokenizer as the thinking badge. This fixes the contradiction where total output tokens appeared smaller than the thinking token count (the old formula estimated thinking content with a different ratio, making the two numbers incomparable). Both streaming and non-streaming bridge paths are migrated, and tool-call arguments are included",
+                    ),
+                    Bilingual::new(
+                        "根据上游 credits 消耗校准缓存读取用量：结合静态前缀上界与 creditsUsed 反推实际命中的缓存 token 数，接入流式落库与非流式响应（此前 Kiro 的 meteringEvent 不返回 cache_read 真值，缓存读取长期不可观测）",
+                        "Cache-read usage is now calibrated from upstream credit consumption: the actual cached token count is inferred by combining the static prefix upper bound with creditsUsed, wired into streaming persistence and non-streaming responses (Kiro's meteringEvent does not report cache_read, so cache reads were previously unobservable)",
+                    ),
+                    Bilingual::new(
+                        "新增 [cache-miss] INFO 诊断日志：credits 反推发现上游缓存部分未命中（命中率 < 80%）时输出命中率、缺失 token 数、与上次结算的闲置间隔及凭据是否变化，用于区分 TTL 逐出、换账号与上游换实例三种原因",
+                        "Added [cache-miss] INFO diagnostics: when credit inference shows a partial upstream cache miss (hit rate < 80%), the log reports the hit ratio, missing tokens, the idle gap since the previous settlement and whether the credential changed, helping tell apart TTL eviction, account switching and upstream instance changes",
+                    ),
+                ]),
+                improve_group(vec![
+                    Bilingual::new(
+                        "缓存漂移诊断提升为 INFO 并按请求类型匹配快照：同一会话混入的标题生成、额度探测、子代理等辅助请求不再被误报为主对话漂移；每个会话保留至多 4 份快照，按系统块重叠字节数匹配最相似的一份，与所有快照都无重叠时标注为「新请求类型」",
+                        "Cache drift diagnostics moved to INFO and now match snapshots by request type: auxiliary requests sharing a session (title generation, quota probes, sub-agents) are no longer misreported as main-conversation drift. Up to four snapshots are kept per session and matched by shared system-block bytes; a request overlapping none of them is labelled a new request type",
+                    ),
+                    Bilingual::new(
+                        "首条消息、单条消息重发及 history[0] 重置轮次不再把尚未建立缓存的 system + tools 误计入缓存读取，报告的 cache_read 更贴近实际分母",
+                        "The first message of a window, single-message resends and turns that reset history[0] no longer count the not-yet-cached system + tools as cache reads, so reported cache_read better matches the real denominator",
+                    ),
+                    Bilingual::new(
+                        "使用日志新增缓存命中率胶囊，深度思考 Token 数改为琥珀色胶囊样式",
+                        "The usage log now shows a cache hit-rate pill, and the thinking token count uses an amber pill style",
+                    ),
+                ]),
+                fix_group(vec![Bilingual::new(
+                    "暂隐藏使用日志的缓存命中百分比胶囊：meteringEvent 不返回 cache_read 真值，命中率完全依赖 credits 反推，而反推在 credits 高于全未命中基线时被截断为 0%，会把缓存写入轮误显成 0%。口径校准前先隐藏，功能开关保留在代码中可随时恢复；缓存读取数字行不受影响",
+                    "Temporarily hide the cache hit-rate pill in the usage log: meteringEvent does not report cache_read, so the rate relies entirely on credit inference, which clamps to 0% whenever credits exceed the all-miss baseline and misrenders cache-write turns as 0%. Hidden until the metric is calibrated, with the switch kept in code for easy restore; the cache-read token row is unaffected",
+                )]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.39".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "终端入口（cli）的思考文本由变暗改为变暗 + 斜体，与其他入口的引用块 + 斜体样式视觉一致；历史里旧版本渲染的变暗文本回传上游时仍会被整块剥离",
+                        "Thinking text in the terminal entry (cli) is now rendered dim + italic instead of dim only, matching the blockquote + italic style used by other entries; legacy dim-only text in client history is still stripped before being sent upstream",
+                    ),
+                    Bilingual::new(
+                        "Admin 模型页在模型 ID 下方展示上游返回的模型描述（悬停显示全文）；上游未返回时不渲染",
+                        "The Admin models page now shows the upstream model description under the model ID (full text on hover); nothing is rendered when upstream does not return one",
+                    ),
+                ]),
+                fix_group(vec![Bilingual::new(
+                    "修复 Claude Code 长会话中 credits 偏高的一个原因：CC 中途追加的“任务工具提醒”（The task tools haven't been used recently…）被并入 history[0]，每触发一次就使上游前缀缓存整段失效。现将其归入动态块，改放到当前消息开头，模型仍可见。新增 DEBUG 级漂移诊断日志（需开启 debugLogs）：缓存 key 变化时列出新增的系统块，便于定位其他类似提醒",
+                    "Fix one cause of inflated credits in long Claude Code sessions: the mid-session \"task tools haven't been used recently\" reminder was merged into history[0], invalidating the whole upstream prefix cache each time it fired. It is now treated as a dynamic block and moved to the start of the current message, so the model still sees it. Adds DEBUG-level drift diagnostics (requires debugLogs) that list newly added system blocks whenever the cache key changes, to help locate similar reminders",
+                )]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.38".to_string(),
+            is_latest: false,
+            groups: vec![fix_group(vec![Bilingual::new(
+                "修复 Codex Desktop 通过 /v1/responses 接入时所有 MCP 工具和子代理工具都不可用的问题：此前只展开 functions 命名空间，其余 namespace 容器整体被丢弃；现在其子工具展开为 ns__叶子名 发给上游，并在响应里还原为 function_call 的 namespace + 叶子 name，历史回放同步使用同一命名规则；namespace 内的 custom 工具仍会被跳过。注意：被发送的工具数量增加，输入 token 会相应上升（#57）",
+                "Fix all MCP and sub-agent tools being unavailable when Codex Desktop connects via /v1/responses: only the functions namespace used to be expanded and every other namespace container was dropped. Their child tools are now flattened to ns__leaf for the upstream, restored to function_call namespace + leaf name in responses, and replayed history uses the same naming rule; custom tools inside a namespace are still skipped. Note: more tools are now sent, so input tokens increase accordingly (#57)",
+            )])],
+        },
+        ReleaseNote {
+            version: "3.4.37".to_string(),
+            is_latest: false,
+            groups: vec![
+                improve_group(vec![Bilingual::new(
+                    "思考文本化在非 cli 入口（Claude Desktop、local-agent 等）改用 Markdown 引用块 + 斜体来近似变暗，不含任何转义序列，避免出现 ESC 方块与字面 [2m/[0m（#54）；cli 入口仍使用 ANSI 变暗样式",
+                    "Thinking-as-text on non-cli entries (Claude Desktop, local-agent, etc.) now renders as a Markdown blockquote with italics to approximate dimming, with no escape sequences, avoiding ESC blocks and literal [2m/[0m (#54); the cli entry still uses ANSI dimming",
+                )]),
+                fix_group(vec![
+                    Bilingual::new(
+                        "修复 Claude Code 开启 advisor 后整个会话每次请求都返回 400 的问题：内联 system 消息中的 tool_addition / tool_removal 事件现在会被跳过，同条消息里的文本照常保留；type 为 advisor_* 的服务端工具不再作为普通工具转发给 Kiro（Kiro 无对应能力，本次仅做兼容降级，并不提供 advisor 功能本身）（#56）",
+                        "Fix HTTP 400 on every request once Claude Code enables advisor: tool_addition / tool_removal events in inline system messages are now skipped while text in the same message is kept, and server tools whose type starts with advisor_ are no longer forwarded to Kiro as ordinary tools (Kiro has no equivalent; this is a compatibility fallback only and does not provide advisor itself) (#56)",
+                    ),
+                    Bilingual::new(
+                        "修复历史回传时剥离思考文本过度的问题：只剥离渲染器补充的换行，降级路径（流被中断、缺少时长行）仅拆开头的引用段，避免误删正文",
+                        "Fix over-aggressive stripping of rendered thinking text in replayed history: only newlines added by the renderer are removed, and the fallback path (interrupted stream without a duration line) now unwraps only the leading quote run, so answer text is no longer clipped",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.36".to_string(),
+            is_latest: false,
+            groups: vec![fix_group(vec![
+                Bilingual::new(
+                    "修复 Claude Desktop Cowork 模式下思考内容出现 ESC 方块与字面 ANSI 转义序列（如 [2m/[0m）的格式异常：思考文本化输出改为仅 cli 入口（或解析不出入口的老格式 UA）使用 ANSI 变暗样式，Claude Desktop / local-agent / VS Code / SDK 等其余入口一律用纯文本，任何客户端下都不会乱码（#54）",
+                    "Fix garbled thinking content in Claude Desktop Cowork mode (ESC blocks and literal ANSI sequences like [2m/[0m): thinking-as-text output now applies ANSI dimming only for the cli entry (or legacy UAs without a parseable entry); all other entries — Claude Desktop / local-agent / VS Code / SDK — fall back to plain text, which renders correctly in every client (#54)",
+                ),
+                Bilingual::new(
+                    "修复管理面板账号详情、API Key 详情与失败/限流日志页滚动到底出现大块空白的问题：根容器改为确定高度 flex 布局，消除页面级与表格内层的双层滚动，页面级滚动归零后仅保留表格单层滚动",
+                    "Fix a large blank area when scrolling to the bottom of the account detail, API Key detail and failure/throttle log pages: the root container now uses a fixed-height flex layout, eliminating the dual page-level + table-level scrollbars so only the table scrolls internally",
+                ),
+            ])],
+        },
+        ReleaseNote {
+            version: "3.4.35".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "账号余额弹窗新增多时间窗使用统计：累计 / 今日 / 7 天 / 30 天四组统计卡片，各自展示请求数、输入输出 Tokens、花费与 Credits 消费；新增 /credentials/{id}/usage/today|7days|30days 端点，按 CST（UTC+8）自然日聚合，口径与累计统计一致（受明细缓冲裁剪约束）",
+                    "Multi-range usage stats in the account balance dialog: four stat card groups — total / today / 7 days / 30 days — each showing requests, input/output tokens, cost and credits consumption; backed by new /credentials/{id}/usage/today|7days|30days endpoints aggregated by CST (UTC+8) calendar day, same scope as the total stats (bounded by the retained-records cap)",
+                )]),
+                fix_group(vec![Bilingual::new(
+                    "i18n 英文文案润色：修正 20 余处不地道或歧义表述，包括批量操作文案缺失批量语义（Restore Failed Accounts、Batch Disable 等）、中式英语（Re-query → Refresh balance、Release to import → Drop the file to import、Real Credits → Actual Credits 等）与冠词、大小写细节",
+                    "i18n English copy polish: fixed 20+ non-idiomatic or ambiguous phrasings, including batch-action labels missing the batch semantic (Restore Failed Accounts, Batch Disable, etc.), unnatural wording (Re-query → Refresh balance, Release to import → Drop the file to import, Real Credits → Actual Credits, etc.) and article/capitalization details",
+                )]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.34".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "账号编辑弹窗重构：已有信息（邮箱、登录来源、Auth Region、Client ID、Profile ARN、Machine ID）改为「有值即锁定」只读展示，无值字段仍可补录；表单按「核心凭据 / 身份与区域 / 运行与网络」三分区重排，分区卡片、分段器与头部图标统一为 credential-form-kit 共享视觉基元；账号状态接口随之下发 clientId / profileArn / machineId（均非机密字段）",
+                        "Account edit dialog redesign: existing values (email, login source, Auth Region, Client ID, Profile ARN, Machine ID) are shown read-only under a value-locks-the-field rule, while empty fields stay editable for backfill. The form is regrouped into Core Credentials / Identity & Region / Runtime & Network sections, with section cards, segmented controls and the header icon unified into a shared credential-form-kit; the credential status API now returns clientId / profileArn / machineId (all non-secret)",
+                    ),
+                    Bilingual::new(
+                        "使用日志页与账号详情页新增总费用 / 总 Credits / 总 Token 统计：使用日志页指标条扩为 7 项（区间总计 + 当页汇总）；账号详情页新增累计统计卡，配套新端点 /credentials/{id}/usage/summary（按账号聚合全部留存记录，口径与该页总请求数一致，不含已裁剪历史）；日报 DailySummary 补充 totalOutputTokens",
+                        "Total cost / total credits / total tokens stats on the usage log page and account detail page: the usage log metrics bar expands to 7 items (range totals plus current-page rollups); the account detail page gains cumulative stat cards backed by a new /credentials/{id}/usage/summary endpoint that aggregates all retained records for an account (same scope as its total-request count, trimmed history excluded); DailySummary now includes totalOutputTokens",
+                    ),
+                ]),
+                improve_group(vec![Bilingual::new(
+                    "账号弹窗细节打磨：分区卡片与页脚按钮右缘精确对齐关闭按钮（19px 同线）；弹窗滚动条整体隐藏（滚动仍可用，各平台口径一致）；只读字段与双输入组补齐 role / aria-label 无障碍语义",
+                    "Account dialog polish: section cards and footer buttons align flush with the close button's right edge (19px line); dialog scrollbars are hidden while scrolling still works, consistent across platforms; read-only fields and paired inputs gain role / aria-label accessibility semantics",
+                )]),
+                fix_group(vec![Bilingual::new(
+                    "修复编辑弹窗在列表自动刷新场景下的健壮性问题：初始值快照补 priority 参与差异比对，避免弹窗打开期间他人修改优先级后被旧值覆盖；快照守卫重构为可空 state + useLayoutEffect，修复关闭态对 null 取属性导致整页白屏；刷新按钮加防重入锁并统一禁用/旋转加载态；Credits 大数改紧凑缩写防窄格溢出；统计单位文案接入 i18n",
+                    "Robustness fixes for the edit dialog under automatic list refresh: the initial-value snapshot now includes priority in diff detection so a priority changed by someone else mid-edit is no longer silently overwritten with a stale value; the snapshot guard is rebuilt as nullable state plus useLayoutEffect, fixing a whole-page white screen caused by dereferencing null while the dialog is closed; the refresh button gains a re-entry lock with unified disabled/spinning states; large credit numbers switch to compact notation to avoid narrow-cell overflow; stat unit labels are moved into i18n",
+                )]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.33".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "admin-ui 新增「使用文档」页：按设计稿重写为 sticky hero + 计数角标分区 tabs + STEP 01/02/03 三卡流转 + Mac 窗体代码工作台，内置快速接入、开发指南、接口参考、排障指南四大分区，支持 hash 深链、TOC 滚动跟随、API Key 自动填充与 CC Switch 一键导入；账号管理页与 API Keys 页的 GitHub README 外链改为站内文档入口",
+                    "New Usage Docs page in admin-ui: rewritten to match the design with a sticky hero, count-badged section tabs, a STEP 01/02/03 flow, and a Mac-style code workbench. It ships Quick Start, Development, API Reference and Troubleshooting sections with hash deep links, scroll-following TOC, API key auto-fill and one-click CC Switch import; the GitHub README links on the Accounts and API Keys pages now point to this in-app page",
+                )]),
+                fix_group(vec![
+                    Bilingual::new(
+                        "文档页 Codex CLI 配置补齐 env_key = \"KIRO_API_KEY\" 且 .env 变量名同步，此前照抄页面配置首次请求会因不带密钥返回 401；接口参考的示例命令改用已选中的实际 API Key，不再固定 <API_KEY> 占位符；未选择 Key 时 CC Switch 卡片改为纯提示，不再把提示文案当链接复制",
+                        "Docs page Codex CLI config now includes env_key = \"KIRO_API_KEY\" with a matching .env variable name — copying the previous snippet returned 401 on the first request for lack of a key. API Reference examples use the selected key instead of a fixed <API_KEY> placeholder, and the CC Switch card shows plain text instead of making the hint copyable when no key is selected",
+                    ),
+                    Bilingual::new(
+                        "文档页细节修正：hash 跳转后的 TOC 高亮锁定改用定时器状态，不再在渲染期读取时钟，并修复清空 fragment 后高亮永久失效；代码块复制定时器补清理，避免连续点击堆叠与卸载后 setState；客户端切换改用 aria-pressed 按钮修正无障碍语义；排障示例标题补英文翻译，端点数量描述与端口展示修正",
+                        "Docs page fixes: the post-hash-jump TOC highlight lock now uses a timer-backed state instead of reading the clock during render, and no longer gets stuck after the fragment is cleared; the code block copy timer is cleaned up to avoid stacked timeouts and setState after unmount; client tabs use aria-pressed buttons with correct semantics; troubleshooting example labels are translated, and the endpoint count wording and port display are corrected",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.32".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![Bilingual::new(
+                    "设置页新增 DEBUG 日志开关（debugLogs）：控制台、日志文件与「查看日志」页三处同步输出 DEBUG 级别事件，可热切换并写回 config.json，无需重启；RUST_LOG 指令仍优先，开关只升不降",
+                    "New DEBUG logs switch (debugLogs) in Settings: console, log file and the Logs page output DEBUG events together; hot-toggled and persisted to config.json without a restart. RUST_LOG directives still take precedence and the switch only raises verbosity",
+                )]),
+                fix_group(vec![
+                    Bilingual::new(
+                        "修复 Claude Code Read 工具返回的图片被静默丢弃（issue #52，感谢 @jayus71 的 PR #53）：tool_result 内嵌图片现在随请求转发给 Kiro；并行读多张图时，图片说明改用整条消息内的全局序号 [Image n attached from tool_result <id>]，让模型能把图对应到工具结果（实测并行读三张图顺序正确率由约 1/6 提升到 5/6）；无法转发的图片（如 SVG）留下占位，不再让模型误以为工具返回了空内容；合并历史消息与过滤孤立 tool_result 后序号保持与最终图片位置一致",
+                        "Fixed images returned by Claude Code's Read tool being silently dropped (issue #52, thanks to @jayus71 for PR #53): images embedded in tool_result are now forwarded to Kiro. When several images are read in parallel, captions use a message-wide ordinal [Image n attached from tool_result <id>] so the model can map each image to its tool result (parallel three-image order accuracy rose from about 1/6 to 5/6 in testing). Images that cannot be forwarded (e.g. SVG) leave a placeholder instead of looking like an empty tool result, and ordinals stay aligned with final image positions after merging history messages and dropping orphaned tool_results",
+                    ),
+                    Bilingual::new(
+                        "修复 OpenAI Responses 端点 function_call_output / custom_tool_call_output 中的图片被丢弃（Codex view_image、截图类工具）：data URL 图片现在进入 Kiro images，远程 URL 与转换失败的图片降级为文本占位，不再产出空内容",
+                        "Fixed images in OpenAI Responses function_call_output / custom_tool_call_output being dropped (Codex view_image and screenshot tools): data URL images now reach Kiro images, while remote URLs and images that fail to convert degrade to text placeholders instead of producing empty content",
+                    ),
+                    Bilingual::new(
+                        "缓存断点记账修正：本地缓存写入与 metering 上报口径解耦，避免后续请求回落本地模拟时读不到前缀；defer_loading 工具移出顶层缓存前缀，改在 tool_reference 引用处展开定义，仅改被引用工具的 schema 时不再误报缓存命中；规范化键做 JSON 转义，避免键 a:1,b 与键 a、b 同哈希。仅在 promptCacheAccounting 开启时影响本地 usage 计量",
+                        "Cache breakpoint accounting fixes: local cache commits are decoupled from metering reporting so later requests falling back to local simulation can still read the prefix; defer_loading tools leave the top-level cache prefix and are expanded at their tool_reference sites, so changing only a referenced tool's schema no longer reports a false cache hit; canonical keys are JSON-escaped so key a:1,b no longer hashes like keys a and b. Only affects local usage accounting when promptCacheAccounting is enabled",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.31".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "新增 promptCacheAccounting 开关：按 Anthropic cache_control 断点规则在本地模拟缓存记账，cache_read / cache_creation（含 5m/1h 拆分）按请求断点、20 block 回看与 TTL 计算，取代「除最后一条外全部计为缓存读」的前缀估算；缓存按 API Key 隔离并落盘 prompt_cache.json，重启后恢复，OpenAI 兼容端点按自动前缀缓存处理。配套 promptCacheMinTokens 覆盖最小可缓存长度，outputTokensIncludeThinking 让上报的 output_tokens 含 thinking（官方口径）。默认关闭，行为与此前一致（本地模拟，不代表 Kiro 真实成本）",
+                        "New promptCacheAccounting switch: simulates prompt cache accounting locally following Anthropic cache_control breakpoint rules — cache_read / cache_creation (including the 5m/1h split) are computed from request breakpoints, the 20-block lookback and TTL, replacing the prefix estimate that counted everything except the last message as cache reads. Caches are isolated per API Key and persisted to prompt_cache.json, restored on restart; OpenAI-compatible endpoints use automatic prefix caching. Companion options: promptCacheMinTokens overrides the minimum cacheable length, and outputTokensIncludeThinking makes reported output_tokens include thinking (official semantics). Disabled by default with unchanged behavior (local simulation, not Kiro's real cost)",
+                    ),
+                    Bilingual::new(
+                        "/v1/models 新增 modelsOfficialAliases 开关：为上游点号模型 ID 追加官方连字符别名（如 claude-opus-4.6 → claude-opus-4-6，4.5 代际额外追加带日期 ID），供按模型列表生成映射的下游网关使用；默认关闭，避免 Claude Code 模型选择器出现重复项",
+                        "New modelsOfficialAliases switch for /v1/models: appends official hyphenated aliases to upstream dotted model IDs (e.g. claude-opus-4.6 → claude-opus-4-6, with dated IDs added for the 4.5 generation) for downstream gateways that build model mappings from the list; disabled by default to avoid duplicate entries in the Claude Code model picker",
+                    ),
+                ]),
+                fix_group(vec![
+                    Bilingual::new(
+                        "修复 Suggestion Mode 拦截后的空响应写死 model=\"suggestion\"、output_tokens=1：改为回显请求 model 并上报零用量，避免下游按响应记账的网关误判模型不一致并产生计费",
+                        "Fixed the intercepted Suggestion Mode response hardcoding model=\"suggestion\" and output_tokens=1: it now echoes the requested model and reports zero usage, so downstream gateways that bill from responses no longer flag a model mismatch or charge for it",
+                    ),
+                    Bilingual::new(
+                        "断点记账按评审与 CR 意见收紧：缓存按 API Key + 映射后 Kiro 模型 ID 隔离，低于最小长度的断点不建条目；默认关闭路径恢复零拷贝，缓存表淘汰保留 10% 滞回，快照持锁仅复制条目、编码移到锁外，后台任务 JoinError 与快照读取失败补 warn 日志；API Key 详情页逐模型用量折叠标题恢复 h3 语义",
+                        "Tightened breakpoint accounting per review and code-review feedback: caches are isolated by API Key plus mapped Kiro model ID, breakpoints below the minimum length create no entry; the default-off path is zero-copy again, eviction keeps a 10% hysteresis, snapshots copy entries under lock and encode outside it, and warn logs cover JoinError and snapshot read failures; the per-model usage collapsible title on the API Key detail page regains h3 semantics",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.30".to_string(),
+            is_latest: false,
+            groups: vec![
+                feat_group(vec![
+                    Bilingual::new(
+                        "请求明细页全面接入「按模型分组（当前页）」可折叠统计面板：账号详情、API Key 详情、使用日志（今日/自定义区间）、日明细五处同款，聚合当前页请求的请求数/Token/费用/积分，折叠偏好跨页面切换保持",
+                        "Per-model grouping (current page) collapsible panel rolled out across all request-detail views: credential detail, API Key detail, usage log (today/custom range) and daily detail share the same panel aggregating requests/tokens/cost/credits of the current page, with the collapse preference preserved across page switches",
+                    ),
+                    Bilingual::new(
+                        "新增一键构建并启动脚本 build-and-run（mac/Windows）：先构建后启动，任一环节失败即中止，不会用旧二进制启动；Shell 快捷命令同步新增 build_and_run_kiro2cc_proxy",
+                        "New build-and-run one-click scripts (mac/Windows): build then run, aborting on any failure so a stale binary is never started; the build_and_run_kiro2cc_proxy shell alias is added in sync",
+                    ),
+                ]),
+                fix_group(vec![
+                    Bilingual::new(
+                        "修复 local-agent 等入口思考文本化静默失效（v3.4.23 引入的回归）：入口判定改为黑名单，只有确认渲染不了 ANSI 的 claude-desktop* 用纯文本样式，其余 Claude Code 入口一律 ANSI，恢复思考过程实时可见（issue #48）",
+                        "Fixed silently disabled thinking-as-text for local-agent and other entrypoints (a regression introduced in v3.4.23): entrypoint routing switches to a blacklist — only claude-desktop*, which cannot render ANSI, uses plain text, while every other Claude Code entrypoint gets ANSI, restoring live thinking output (issue #48)",
+                    ),
+                    Bilingual::new(
+                        "修复账号管理「刷新」按钮不更新今日消耗积分等每日统计：补上与切 tab 刷新同款的统计查询失效；本地启动脚本改为轮询服务就绪后再自动打开管理面板，消除页面加载失败需手动 reload 的竞态；Windows 构建脚本补齐退出码检查",
+                        "Fixed the account Refresh button not updating today's credits and other daily stats by invalidating the stats query like tab-switch refresh does; local startup scripts now poll until the service is ready before auto-opening the admin panel, removing the load-failure race that required a manual reload; Windows build scripts now check exit codes",
+                    ),
+                ]),
+            ],
+        },
+        ReleaseNote {
+            version: "3.4.27".to_string(),
+            is_latest: false,
+            groups: vec![feat_group(vec![
+                Bilingual::new(
+                    "请求日志新增「用时」列：流式记录展示首字/耗时双徽章（按快慢分档着色），非流式仅耗时；首字埋点按客户端可见产出判定，桥接 web_search 计入、空事件不计",
+                    "Usage log gains a Duration column: streaming records show first-token/duration badges tinted by speed, non-streaming shows duration only; first-token timing is keyed to client-visible output — bridged web_search counts, empty events don't",
+                ),
+                Bilingual::new(
+                    "请求日志新增深度思考 token 统计：🧠 徽章内联在输出 Tokens 旁，BPE 真值口径，与客户端「Thought for Ns (N tokens)」显示一致",
+                    "Usage log gains thinking-token statistics: a 🧠 badge inline next to output tokens, BPE-exact, consistent with the client's \"Thought for Ns (N tokens)\" display",
+                ),
+                Bilingual::new(
+                    "支持上游新增的 kimi-k3 模型：关键词映射、静态模型表条目、支持模型页归入 KIMI 家族；深度思考按第三方模型惯例走文本标签协议",
+                    "Supports the new upstream kimi-k3 model: keyword mapping, static model list entry, KIMI family grouping on the models page; deep thinking follows the third-party text-tag convention",
+                ),
+            ])],
+        },
+        ReleaseNote {
+            version: "3.4.26".to_string(),
+            is_latest: false,
+            groups: vec![feat_group(vec![Bilingual::new(
+                "admin-ui 新增主题设置页：37 套色彩主题（经典网站/浅色/深色/编辑器分组）× 明暗双模式自由组合，带实时预览色板与 View Transition 圆形扩散切换动画，选择持久化到 localStorage；侧栏顶栏新增主题入口，支持一键恢复默认外观",
+                "admin-ui gains a Theme Settings page: 37 color themes (website/light/dark/editor groups) freely combined with light/dark modes, featuring live preview swatches and a View Transition circular reveal animation, with the selection persisted to localStorage; a theme entry is added to the sidebar and top bar, with one-click reset to the default appearance",
+            )])],
+        },
+        ReleaseNote {
+            version: "3.4.25".to_string(),
+            is_latest: false,
+            groups: vec![feat_group(vec![Bilingual::new(
+                "混合账号池按账号实际可用模型路由：调度前用各账号 ListAvailableModels 探测结果前置过滤，请求不再被分发到不支持目标模型的账号（此前上游直接拒绝且不触发故障转移）。探测结果缓存 30 分钟、失败 2 分钟后重试，稳态零网络开销；探测失败/空列表视为未知不过滤，候选全部明确不支持时回退为不过滤（issue #49）",
+                "Model-aware routing for mixed account pools: account availability is probed via ListAvailableModels and requests are no longer dispatched to accounts that do not support the target model (previously rejected upstream without failover). Probe results are cached for 30 minutes with a 2-minute retry after failure, at zero steady-state network cost; failures/empty lists are treated as unknown (no filtering), and when all candidates are known-unsupported the filter is skipped (issue #49)",
+            )])],
+        },
+        ReleaseNote {
+            version: "3.4.24".to_string(),
+            is_latest: false,
+            groups: vec![fix_group(vec![Bilingual::new(
+                "修复 Claude Desktop 客户端开启 thinkingAsText 时思考内容出现 ANSI 转义乱码（[2m / [0m 与方块字符）：终端能渲染 ANSI，但 Desktop 是图形界面不解析，ESC 直接显示为乱码。现按 User-Agent 括号内的入口字段选择渲染样式——cli 或解析不出入口仍用 ANSI（行为不变），claude-desktop* 改用无转义的纯文本（标记行与正文、时长行间留空行，正文换行用 Markdown 硬换行以适配渲染），其余入口（claude-vscode、sdk-ts 等渲染能力未知）不启用该功能、回退原生 thinking（issue #48）",
+                "Fixed ANSI escape garbage ([2m / [0m and box characters) in thinking output when thinkingAsText is enabled on Claude Desktop: terminals render ANSI but Desktop is a GUI that does not parse it, so the ESC byte shows as garbage. The render style is now chosen by the entrypoint field in the User-Agent — cli or unparseable entrypoints keep ANSI (unchanged), claude-desktop* switches to escape-free plain text (blank lines around the marker and duration lines, Markdown hard breaks for body newlines), and other entrypoints (claude-vscode, sdk-ts, etc., whose rendering capability is unknown) leave the feature off and fall back to native thinking (issue #48)",
+            )])],
+        },
         ReleaseNote {
             version: "3.4.22".to_string(),
             is_latest: false,

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Harllan He. Licensed under MIT.
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Copy, Plus, Check, RotateCw, Link2, FileText, Eraser, Box } from 'lucide-react'
+import { Copy, Plus, Check, RotateCw, Link2, Eraser, Box } from 'lucide-react'
 import { toast } from 'sonner'
 import { PageHead } from '@/components/page-head'
 import { SearchBox, Segmented, Toolbar, UpdatedAgo, type SegmentedOption } from '@/components/toolbar'
@@ -23,6 +23,7 @@ import { extractErrorMessage } from '@/lib/utils'
 import { copyToClipboard as writeToClipboard } from '@/lib/clipboard'
 import { importToCcSwitch, type CcSwitchApp } from '@/lib/ccswitch'
 import { localeTag } from '@/lib/locale'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 import type { ApiKeyItem, UsageSummary } from '@/types/api'
 import { ApiKeysUsageMetrics } from '@/components/api-keys/usage-metrics'
 import { EXPIRING_SOON_MS, ITEMS_PER_PAGE, formatLocalDate, type KeyStatusFilter, type SortBy } from '@/components/api-keys/panel-constants'
@@ -121,8 +122,8 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
   const usageMap = new Map<number, UsageSummary>()
   usageData?.forEach((u) => usageMap.set(u.apiKeyId, u))
 
-  const handleResetUsage = (key: ApiKeyItem) => {
-    if (!confirm(t('apiKeys.confirmResetUsage', { name: key.name }))) return
+  const handleResetUsage = async (key: ApiKeyItem) => {
+    if (!(await confirmDialog(t('apiKeys.confirmResetUsage', { name: key.name })))) return
     resetUsage(key.id, {
       onSuccess: () => toast.success(t('apiKeys.toastUsageReset')),
       onError: (err) => toast.error(extractErrorMessage(err)),
@@ -267,8 +268,8 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
     )
   }
 
-  const handleDelete = (key: ApiKeyItem) => {
-    if (!confirm(t('apiKeys.confirmDelete', { name: key.name }))) return
+  const handleDelete = async (key: ApiKeyItem) => {
+    if (!(await confirmDialog(t('apiKeys.confirmDelete', { name: key.name })))) return
     deleteKey(key.id, {
       onSuccess: () => toast.success(t('apiKeys.toastDeleted')),
       onError: (err) => toast.error(extractErrorMessage(err)),
@@ -511,17 +512,17 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
     toast.success(t(successKey, { count: done }))
   }
 
-  const handleBatchDisable = () => {
+  const handleBatchDisable = async () => {
     const ids = allKeys.filter((k) => selectedIds.has(k.id) && k.enabled).map((k) => k.id)
     if (ids.length === 0) return
-    if (!confirm(t('apiKeys.confirmBatchDisable', { count: ids.length }))) return
+    if (!(await confirmDialog(t('apiKeys.confirmBatchDisable', { count: ids.length })))) return
     void runBatch(ids, (id) => updateApiKeyApi(id, { enabled: false }), 'apiKeys.toastBatchDisabled')
   }
 
-  const handleBatchResetUsage = () => {
+  const handleBatchResetUsage = async () => {
     const ids = selectedExistingIds
     if (ids.length === 0) return
-    if (!confirm(t('apiKeys.confirmBatchReset', { count: ids.length }))) return
+    if (!(await confirmDialog(t('apiKeys.confirmBatchReset', { count: ids.length })))) return
     void runBatch(ids, resetKeyUsageApi, 'apiKeys.toastBatchReset')
   }
 
@@ -565,33 +566,24 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
 
   return (
     <div>
-      {/* 页头（设计稿 .head）：面包屑 + 19px 标题 + 同基线副标题 + 右侧状态标签与文档入口 */}
+      {/* 页头（设计稿 .head）：面包屑 + 19px 标题 + 同基线副标题 + 右侧状态标签 */}
       <PageHead
         crumb={[t('dashboard.navMain'), t('apiKeys.pageTitle')]}
         title={t('apiKeys.pageTitle')}
         note={t('apiKeys.pageSubtitle')}
         actions={
           <>
-            <span className="inline-flex h-5 shrink-0 items-center gap-[5px] rounded-md border border-ok-line bg-ok-soft px-[7px] text-[11px] font-semibold text-ok">
+            <span className="inline-flex h-5 shrink-0 items-center gap-[5px] rounded-md border border-transparent bg-ok-soft px-[7px] text-[11px] font-semibold text-ok">
               <span className="h-[5px] w-[5px] shrink-0 animate-pulse rounded-full bg-ok ring-[2.5px] ring-ok-soft" aria-hidden="true" />
               {t('apiKeys.serviceRunningTag')}
             </span>
-            <a
-              href="https://github.com/TsinHzl/kiro2cc-proxy#readme"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group inline-flex h-[31px] items-center gap-1.5 rounded-[7px] px-[11px] text-[12.5px] font-medium text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink"
-            >
-              <FileText className="h-3.5 w-3.5 text-ink-3 transition-colors group-hover:text-ink-2" />
-              {t('apiKeys.docsLink')}
-            </a>
           </>
         }
       />
 
       {/* 连接卡（设计稿 .conn）：客户端接入所需的 Base URL 与兼容协议一次给全。
           设计稿右侧的「在新窗口打开」未实现 —— 本服务无可浏览端点（/v1/* 均需认证），渲染即死交互 */}
-      <section className="flex shrink-0 flex-wrap items-center gap-4 rounded-[11px] border border-hairline bg-surface px-4 py-[13px] shadow-hair">
+      <section className="flex shrink-0 flex-wrap items-center gap-4 rounded-[11px] border border-transparent bg-surface px-4 py-[13px] shadow-hair">
         <div className="min-w-0">
           <div className="flex items-center gap-[5px] text-[10.5px] font-semibold uppercase tracking-[.07em] text-ink-3">
             <Link2 className="size-[13px] shrink-0" />
@@ -612,7 +604,7 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
             {window.location.host}
           </div>
         </div>
-        <span aria-hidden="true" className="mx-0.5 hidden w-px self-stretch bg-hairline sm:block" />
+        <span aria-hidden="true" className="mx-0.5 hidden w-[0.5px] self-stretch bg-hairline sm:block" />
         <div className="min-w-0">
           <div className="flex items-center gap-[5px] text-[10.5px] font-semibold uppercase tracking-[.07em] text-ink-3">
             <Link2 className="size-[13px] shrink-0" />
@@ -633,7 +625,7 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
             <span className="text-ink-3">/v1</span>
           </div>
         </div>
-        <span aria-hidden="true" className="mx-0.5 hidden w-px self-stretch bg-hairline sm:block" />
+        <span aria-hidden="true" className="mx-0.5 hidden w-[0.5px] self-stretch bg-hairline sm:block" />
         <div className="min-w-0">
           <div className="flex items-center gap-[5px] text-[10.5px] font-semibold uppercase tracking-[.07em] text-ink-3">
             <Box className="size-[13px] shrink-0" />
@@ -643,7 +635,7 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
             {['Anthropic Messages', 'Claude Code /cc/v1', 'Codex Responses', 'OpenAI Chat'].map((protocol) => (
               <span
                 key={protocol}
-                className="whitespace-nowrap rounded-[5px] border border-hairline bg-surface-3 px-1.5 py-px text-[10.5px] font-semibold tracking-[.03em] text-ink-2"
+                className="whitespace-nowrap rounded-[5px] border border-transparent bg-surface-3 px-1.5 py-px text-[10.5px] font-semibold tracking-[.03em] text-ink-2"
               >
                 {protocol}
               </span>
@@ -673,7 +665,7 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
         {/* 分隔线随危险按钮一起显隐，无无效 Key 时不留孤立竖线 */}
         {invalidKeys.length > 0 && (
           <>
-            <span aria-hidden="true" className="mx-0.5 h-[19px] w-px shrink-0 bg-hairline-2" />
+            <span aria-hidden="true" className="mx-0.5 h-[19px] w-[0.5px] shrink-0 bg-hairline-2" />
             <Button variant="destructive" onClick={() => setPurgeDialogOpen(true)}>
               <Eraser />
               {t('apiKeys.purgeButton', { count: invalidKeys.length })}
@@ -752,17 +744,7 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
             onToggleSelect={() => toggleSelect(apiKey.id)}
             copied={copiedId === apiKey.id}
             createdTitle={t('apiKeys.createdLabel', { date: formatDate(apiKey.createdAt) })}
-            onCopy={() =>
-              copyToClipboard(
-                t('apiKeys.copyContent', {
-                  name: apiKey.name,
-                  ccUrl: window.location.origin,
-                  codexUrl: `${window.location.origin}/v1`,
-                  key: apiKey.key,
-                }),
-                apiKey.id
-              )
-            }
+            onCopy={() => copyToClipboard(apiKey.key, apiKey.id)}
             onImportClaude={() => handleImportToCcSwitch('claude', apiKey)}
             onImportCodex={() => handleImportToCcSwitch('codex', apiKey)}
             onViewDetail={() => onViewDetail(apiKey)}

@@ -20,8 +20,11 @@ pub(crate) use models::available_model_to_model;
 pub(crate) use models::build_model_list;
 pub use models::get_model;
 pub use models::get_models;
+pub use models::set_models_official_aliases;
 pub use ping::ping;
+pub use post_messages::kiro_body_dump_enabled;
 pub use post_messages::post_messages;
+pub use post_messages::set_kiro_body_dump_enabled;
 pub use post_messages_cc::post_messages_cc;
 
 #[cfg(test)]

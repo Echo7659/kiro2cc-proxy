@@ -19,8 +19,8 @@ use crate::anthropic::types::ErrorResponse;
 
 use super::error::parse_messages_request;
 use super::helpers::{
-    extract_client_ip, is_suggestion_mode_request, override_thinking_from_model_name,
-    resolve_thinking_enabled, suggestion_mode_response,
+    extract_client_ip, extract_user_agent, is_suggestion_mode_request,
+    override_thinking_from_model_name, resolve_thinking_enabled, suggestion_mode_response,
 };
 use super::nonstream::handle_non_stream_request;
 use super::stream::handle_stream_request;
@@ -63,7 +63,7 @@ pub async fn post_messages_cc(
             message_count = %payload.messages.len(),
             "拦截 Suggestion Mode 输入建议请求，返回空响应（不转发上游）"
         );
-        return suggestion_mode_response(payload.stream);
+        return suggestion_mode_response(payload.stream, &payload.model);
     }
 
     tracing::info!(
@@ -149,6 +149,7 @@ pub async fn post_messages_cc(
     let is_compact_request = conversion_result.is_compact_request;
     // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
     let thinking_adaptive_requested = conversion_result.thinking_adaptive_requested;
+    let prefix_cached = conversion_result.prefix_cached;
 
     // web_search server tool 桥接上下文（D5/D7：未携带时为 None，零行为变化）
     // 必须在 KiroRequest 构建（conversation_state 被 move）前构造
@@ -157,6 +158,9 @@ pub async fn post_messages_cc(
         state.profile_arn.clone(),
         bound_ids.clone(),
     );
+
+    // 会话 conversationId（cache-miss 诊断用）；须在 conversation_state move 前取出
+    let conversation_id = Some(conversion_result.conversation_state.conversation_id.clone());
 
     // 构建 Kiro 请求
     let kiro_request = KiroRequest {
@@ -183,6 +187,27 @@ pub async fn post_messages_cc(
     // 请求体可能包含 API Key 与敏感上下文，禁止整包入日志（cr-result C4）
 
     // 构造 fingerprint profile（cc 端点同样接入指纹追踪）
+    // 断点缓存记账：按原始 body 的 cache_control 断点 plan（类型化 payload 已丢弃 cache_control）
+    // 缓存按 API Key 隔离（无 Key 上下文时归入同一匿名域）；模型取映射后的 Kiro ID，
+    // 同一模型的不同写法（claude-opus-4-6 / claude-opus-4.6）共享缓存
+    let cache_accounting = match state.breakpoint_cache.as_ref() {
+        Some(cache) => {
+            let tenant = identity
+                .as_ref()
+                .map_or_else(|| "anon".to_string(), |ext| format!("key:{}", ext.0.id));
+            let kiro_model = crate::anthropic::converter::map_model(&payload.model)
+                .unwrap_or_else(|| payload.model.clone());
+            crate::cache::breakpoint::CacheAccounting::from_request(
+                cache,
+                body.clone(),
+                tenant,
+                kiro_model,
+            )
+            .await
+        }
+        None => None,
+    };
+
     let fp_tracker = state.fingerprint_tracker.clone();
     let fp_profile = fp_tracker.as_ref().map(|_| {
         crate::cache::fingerprint::FingerprintTracker::build_profile_with_tools(
@@ -192,33 +217,32 @@ pub async fn post_messages_cc(
         )
     });
 
-    // 估算"缓存前缀" token 数（与 post_messages 同口径，先借用后消费）
-    let prefix_estimated_tokens = {
-        let n = payload.messages.len();
-        let prior: &[_] = if n > 0 {
-            &payload.messages[..n - 1]
-        } else {
-            &[]
-        };
-        token::count_prefix_tokens(payload.system.as_deref(), prior, payload.tools.as_deref())
-            as i32
-    };
+    // 估算"缓存前缀" token 数（与 post_messages 共用同一实现，口径与门控见 helpers::estimate_prefix_tokens）
+    let (raw_prefix_tokens, prefix_estimated_tokens) =
+        super::helpers::estimate_prefix_tokens(&payload, prefix_cached);
 
     // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
+    // credits 汇总行：须在 payload.messages / payload.tools 被 count_all_tokens 消费前判定
+    let credits_footer = crate::anthropic::stream::credits_footer_request(
+        &headers,
+        &payload.messages,
+        payload.tools.as_ref().is_some_and(|t| !t.is_empty()),
+    );
     let input_tokens = token::count_all_tokens_with_prefix(
         payload.model.clone(),
         payload.system,
         payload.messages,
         payload.tools,
-        prefix_estimated_tokens as u64,
+        raw_prefix_tokens,
     ) as i32;
 
     // 提取用量追踪信息
     let api_key_id = identity.map(|ext| ext.0.id);
     let usage_tracker = state.usage_tracker.clone();
     let client_ip = extract_client_ip(&headers, Some(&addr));
+    let user_agent = extract_user_agent(&headers);
 
     // 计算 prompt cache 模拟 usage
     let prompt_cache_usage = crate::cache::PromptCacheUsage::from_ratio_config(
@@ -239,7 +263,8 @@ pub async fn post_messages_cc(
 
     // 思考文本化仅对 Claude Code 客户端生效
     let thinking_as_text = crate::anthropic::stream::thinking_as_text_enabled()
-        && crate::anthropic::stream::is_claude_code_client(&headers);
+        .then(|| crate::anthropic::stream::thinking_text_style(&headers))
+        .flatten();
 
     if payload.stream {
         // 流式响应：与 /v1 相同的实时转发，额外带 300s 全局 deadline
@@ -262,6 +287,10 @@ pub async fn post_messages_cc(
             bridge_ctx,
             effort,
             thinking_as_text,
+            user_agent,
+            cache_accounting,
+            conversation_id,
+            credits_footer,
         )
         .await
     } else {
@@ -285,6 +314,9 @@ pub async fn post_messages_cc(
             bridge_ctx,
             effort,
             thinking_enabled,
+            user_agent,
+            cache_accounting,
+            conversation_id,
         )
         .await
     }

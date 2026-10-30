@@ -5,18 +5,23 @@ use super::super::entry::{CredentialEntry, DisabledReason};
 use super::super::refresh::{
     UsageLimitsUnsupportedError, get_usage_limits, get_usage_limits_without_profile_arn,
     is_token_expired, is_token_expiring_soon, is_transient_usage_limits_error,
-    list_available_models, list_available_profiles, pick_profile_arn, refresh_token, sha256_hex,
+    list_available_models, list_available_profiles, pick_profile_arn, sha256_hex,
     validate_refresh_token,
 };
 use super::super::types::{
     CredentialEntrySnapshot, ManagerSnapshot, MultiTokenManager, TOKEN_REFRESH_COOLDOWN,
 };
+use crate::kiro::machine_id;
 use crate::kiro::model::available_models::AvailableModelsResponse;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::credentials::canonicalize_auth_method_value;
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+#[cfg(test)]
+#[path = "fingerprint_tests.rs"]
+mod fingerprint_tests;
 
 impl MultiTokenManager {
     /// 切换到优先级最高的可用账号
@@ -71,6 +76,33 @@ impl MultiTokenManager {
         list_available_models(&credentials, &self.config, &token, effective_proxy.as_ref()).await
     }
 
+    /// 自动路由探测只允许可调度账号；管理员查询仍可显式检查禁用账号。
+    pub(super) async fn list_available_models_for_routing(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<AvailableModelsResponse> {
+        anyhow::ensure!(self.credential_is_available(id), "账号不可用于自动模型探测");
+        let (credentials, token) = self.acquire_token_for_id(id).await?;
+        let context = super::super::types::CallContext {
+            id,
+            credentials,
+            token,
+        };
+        // 刷新/代理检查可能排队：发送前再次检查禁用、Token、出口和身份。
+        anyhow::ensure!(
+            self.context_is_current(&context),
+            "模型探测期间账号或代理身份已变更"
+        );
+        let effective_proxy = context.credentials.effective_proxy(self.proxy.as_ref());
+        list_available_models(
+            &context.credentials,
+            &self.config,
+            &context.token,
+            effective_proxy.as_ref(),
+        )
+        .await
+    }
+
     // ========================================================================
     // Admin API 方法
     // ========================================================================
@@ -84,33 +116,59 @@ impl MultiTokenManager {
         ManagerSnapshot {
             entries: entries
                 .iter()
-                .map(|e| CredentialEntrySnapshot {
-                    id: e.id,
-                    priority: e.credentials.priority,
-                    disabled: e.disabled,
-                    failure_count: e.failure_count,
-                    auth_method: e
-                        .credentials
-                        .auth_method
-                        .as_deref()
-                        .map(|m| canonicalize_auth_method_value(m).to_string()),
-                    has_profile_arn: e.credentials.profile_arn.is_some(),
-                    expires_at: e.credentials.expires_at.clone(),
-                    refresh_token_hash: e.credentials.refresh_token.as_deref().map(sha256_hex),
-                    email: e.credentials.email.clone(),
-                    nickname: e.credentials.nickname.clone(),
-                    provider: e.credentials.provider.clone(),
-                    auth_region: e.credentials.auth_region.clone(),
-                    api_region: e.credentials.api_region.clone(),
-                    success_count: e.success_count,
-                    last_used_at: e.last_used_at.clone(),
-                    refresh_failure_count: e.refresh_failure_count,
-                    has_proxy: e.credentials.proxy_url.is_some(),
-                    proxy_url: e.credentials.proxy_url.clone(),
-                    health_status: Self::compute_health(e),
-                    throttle_count: e.throttle_count,
-                    disabled_reason: e.disabled_reason,
-                    thinking_adaptive: e.credentials.thinking_adaptive,
+                .map(|e| {
+                    let (proxy_route_status, proxy_mode, effective_proxy_url, proxy_exit_ip) =
+                        self.proxy_snapshot(&e.credentials);
+                    CredentialEntrySnapshot {
+                        id: e.id,
+                        priority: e.credentials.priority,
+                        disabled: e.disabled,
+                        failure_count: e.failure_count,
+                        auth_method: e
+                            .credentials
+                            .auth_method
+                            .as_deref()
+                            .map(|m| canonicalize_auth_method_value(m).to_string()),
+                        has_profile_arn: e.credentials.profile_arn.is_some(),
+                        client_id: e.credentials.client_id.clone(),
+                        profile_arn: e.credentials.profile_arn.clone(),
+                        machine_id: e.credentials.machine_id.clone(),
+                        expires_at: e.credentials.expires_at.clone(),
+                        refresh_token_hash: e.credentials.refresh_token.as_deref().map(sha256_hex),
+                        email: e.credentials.email.clone(),
+                        nickname: e.credentials.nickname.clone(),
+                        provider: e.credentials.provider.clone(),
+                        auth_region: e.credentials.auth_region.clone(),
+                        api_region: e.credentials.api_region.clone(),
+                        success_count: e.success_count,
+                        last_used_at: e.last_used_at.clone(),
+                        refresh_failure_count: e.refresh_failure_count,
+                        has_proxy: e.credentials.proxy_url.is_some(),
+                        proxy_url: if e.credentials.proxy_pool_id.is_some() {
+                            None
+                        } else {
+                            e.credentials
+                                .proxy_url
+                                .as_deref()
+                                .map(crate::http_client::safe_proxy_address)
+                        },
+                        proxy_pool_id: e.credentials.proxy_pool_id,
+                        proxy_route_status,
+                        proxy_mode,
+                        effective_proxy_url: effective_proxy_url
+                            .as_deref()
+                            .map(crate::http_client::safe_proxy_address),
+                        proxy_exit_ip,
+                        health_status: Self::compute_health(e),
+                        throttle_count: e.throttle_count,
+                        disabled_reason: e.disabled_reason,
+                        thinking_adaptive: e.credentials.thinking_adaptive,
+                        next_recovery_probe_at: e
+                            .recovery_next_probe_at
+                            .map(|time| time.to_rfc3339()),
+                        recovery_failures: e.recovery_failures,
+                        recovery_probe_in_flight: e.recovery_probe_in_flight,
+                    }
                 })
                 .collect(),
             current_id,
@@ -139,13 +197,80 @@ impl MultiTokenManager {
             || update.machine_id.is_some()
     }
 
+    /// 更新请求是否需要先用新凭据试刷新一次再写入。
+    ///
+    /// `effective` 是应用本次更新之后的账号（认证方式以更新后的为准）。除 `refreshToken` 外，
+    /// `clientId` / `clientSecret` 设为非空新值也必须验证：它们写错后账号当前的 accessToken
+    /// 仍然有效、面板上显示「健康」，要等 token 到期刷新才报 `invalid_client` 并累计失败次数
+    /// 被禁用，故障很难与那次编辑联系起来（issue #58：浏览器把管理密码自动填进 Client Secret
+    /// 框，保存后被当作 clientSecret 写入）。
+    ///
+    /// `clientSecret` 只在 IdC（OIDC）刷新里参与请求；external_idp 是公共客户端、social 不用
+    /// 它，对这两类账号试刷新验证不到新值，只会空转，故仅对 IdC 触发。
+    /// 空串表示清除，不涉及新凭据，不需要验证。
+    pub(crate) fn update_requires_revalidation(
+        update: &crate::admin::types::UpdateCredentialRequest,
+        effective: &KiroCredentials,
+    ) -> bool {
+        let non_empty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+        update.refresh_token.is_some()
+            || non_empty(&update.client_id)
+            || (effective.is_idc() && non_empty(&update.client_secret))
+    }
+
+    /// 本次更新涉及的字段名（驼峰，与 API 字段一致），仅用于日志，不含任何字段值。
+    ///
+    /// 对 `UpdateCredentialRequest` 做穷尽解构（不写 `..`）：结构体新增字段而这里没同步时
+    /// 编译直接报错，不会静默漏掉该字段的审计日志。
+    pub(crate) fn updated_field_names(
+        update: &crate::admin::types::UpdateCredentialRequest,
+    ) -> Vec<&'static str> {
+        let crate::admin::types::UpdateCredentialRequest {
+            refresh_token,
+            auth_method,
+            client_id,
+            client_secret,
+            profile_arn,
+            auth_region,
+            api_region,
+            machine_id,
+            email,
+            nickname,
+            proxy_url,
+            proxy_username,
+            proxy_password,
+            provider,
+            thinking_adaptive,
+        } = update;
+        [
+            ("refreshToken", refresh_token.is_some()),
+            ("authMethod", auth_method.is_some()),
+            ("clientId", client_id.is_some()),
+            ("clientSecret", client_secret.is_some()),
+            ("profileArn", profile_arn.is_some()),
+            ("authRegion", auth_region.is_some()),
+            ("apiRegion", api_region.is_some()),
+            ("machineId", machine_id.is_some()),
+            ("email", email.is_some()),
+            ("nickname", nickname.is_some()),
+            ("proxyUrl", proxy_url.is_some()),
+            ("proxyUsername", proxy_username.is_some()),
+            ("proxyPassword", proxy_password.is_some()),
+            ("provider", provider.is_some()),
+            ("thinkingAdaptive", thinking_adaptive.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+    }
+
     /// 比对「会影响上游返回内容」的身份字段。
     ///
     /// 不包含 `provider`：它除被 `fallback_profile_arn_value` 用于判定 Enterprise 备用 ARN 外，
     /// 既不参与 token 刷新，也不参与 API 请求，更不影响上游返回的订阅等级。若纳入比对，则
     /// 「仅改登录来源 / 补充 provider」的更新会让在途刷新/额度查询以「身份已变更」失败，
     /// 进而累计 `refresh_failure_count` 误禁用账号。
-    fn has_same_subscription_identity(
+    pub(crate) fn has_same_subscription_identity(
         current: &KiroCredentials,
         queried: &KiroCredentials,
     ) -> bool {
@@ -180,6 +305,7 @@ impl MultiTokenManager {
             id
         );
 
+        machine_id::ensure_fixed_machine_id(&mut entry.credentials, &self.config);
         entry.credentials.access_token = refreshed_credentials.access_token.clone();
         entry.credentials.sso_access_token = refreshed_credentials.sso_access_token.clone();
         entry.credentials.refresh_token = refreshed_credentials.refresh_token.clone();
@@ -274,6 +400,7 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.disabled = disabled;
             if !disabled {
                 // 启用时重置失败计数
@@ -303,12 +430,14 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.credentials.priority = priority;
         }
         // 立即按新优先级重新选择当前账号（无论持久化是否成功）
         self.select_highest_priority();
         // 持久化更改
         self.persist_credentials()?;
+        self.save_stats();
         Ok(())
     }
 
@@ -323,6 +452,7 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("账号不存在: {}", id))?;
+            entry.invalidate_recovery();
             entry.failure_count = 0;
             entry.refresh_failure_count = 0;
             entry.disabled = false;
@@ -340,6 +470,7 @@ impl MultiTokenManager {
     /// 封装 token 刷新逻辑（含冷却期、double-check、持久化），供 get_usage_limits_for
     /// 与 list_available_models_for 复用，消除按 id 查询时的刷新逻辑重复。
     async fn acquire_token_for_id(&self, id: u64) -> anyhow::Result<(KiroCredentials, String)> {
+        self.ensure_proxy_route(id).await?;
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -382,10 +513,8 @@ impl MultiTokenManager {
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("冷却期内无 access_token"))?
                 } else {
-                    let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
                     let refreshed_creds =
-                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
-                            .await?;
+                        self.refresh_with_managed_route(id, &current_creds).await?;
                     let committed_creds = self.commit_refreshed_credentials_if_identity_matches(
                         id,
                         &current_creds,
@@ -425,6 +554,25 @@ impl MultiTokenManager {
 
     /// 获取指定账号的使用额度（Admin API）
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+        let credentials = self.ensure_proxy_route(id).await?;
+        let result = self.get_usage_limits_for_once(id).await;
+        if let Err(error) = &result
+            && credentials.proxy_pool_id.is_some()
+            && super::proxy_routes::proxy_transport_failure(error)
+        {
+            let context = crate::kiro::token_manager::CallContext {
+                id,
+                token: credentials.access_token.clone().unwrap_or_default(),
+                credentials,
+            };
+            if self.confirm_proxy_failure(&context).await? {
+                return self.get_usage_limits_for_once(id).await;
+            }
+        }
+        result
+    }
+
+    async fn get_usage_limits_for_once(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
         let (mut credentials, token) = self.acquire_token_for_id(id).await?;
 
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
@@ -626,11 +774,14 @@ impl MultiTokenManager {
     /// # 返回
     /// - `Ok(u64)` - 新账号 ID
     /// - `Err(_)` - 验证失败或添加失败
-    pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+    pub async fn add_credential(&self, mut new_cred: KiroCredentials) -> anyhow::Result<u64> {
         let _operation_guard = self.credential_admin_lock.lock().await;
 
         // 1. 基本验证
+        machine_id::ensure_fixed_machine_id(&mut new_cred, &self.config);
         validate_refresh_token(&new_cred)?;
+        self.prepare_proxy_binding(&mut new_cred).await?;
+        let mut proxy_reservation = self.reserve_new_proxy_binding(&mut new_cred)?;
         let initially_disabled = new_cred.disabled;
 
         // 2. 基于 refreshToken 的 SHA-256 哈希检测重复
@@ -656,9 +807,9 @@ impl MultiTokenManager {
         }
 
         // 3. 尝试刷新 Token 验证账号有效性
-        let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
-        let mut validated_cred =
-            refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?;
+        let mut validated_cred = self
+            .validate_candidate_with_proxy(&mut new_cred, &mut proxy_reservation)
+            .await?;
 
         // 4. 分配新 ID
         //
@@ -688,6 +839,8 @@ impl MultiTokenManager {
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;
         validated_cred.proxy_password = new_cred.proxy_password;
+        validated_cred.proxy_pool_id = new_cred.proxy_pool_id;
+        validated_cred.proxy_pool_generation = new_cred.proxy_pool_generation;
 
         // idc 账号（BuilderId 与企业版共用 OIDC，刷新响应均不带 profileArn）：先尝试发现真实 ARN。
         // 企业版必须有租户自己的 ARN，BuilderId 占位符会被上游拒绝（issue #43）；
@@ -727,6 +880,10 @@ impl MultiTokenManager {
                 last_refreshed_at: None,
                 rotation_bias: 0,
                 quota_exhausted_at: None,
+                recovery_next_probe_at: None,
+                recovery_failures: 0,
+                recovery_generation: 0,
+                recovery_probe_in_flight: false,
             });
         }
 
@@ -753,11 +910,11 @@ impl MultiTokenManager {
 
     /// 更新账号配置（Admin API）
     ///
-    /// 只更新提供的字段，不会触发 token 刷新验证（除非 refreshToken 变更）
+    /// 只更新提供的字段，不会触发 token 刷新验证（除非 refreshToken 变更，或 clientId 设为非空新值、IdC 账号的 clientSecret 设为非空新值；验证失败则不写入）
     pub async fn update_credential(
         &self,
         id: u64,
-        update: crate::admin::types::UpdateCredentialRequest,
+        mut update: crate::admin::types::UpdateCredentialRequest,
     ) -> anyhow::Result<()> {
         let _operation_guard = self.credential_admin_lock.lock().await;
         let _identity_guard = if Self::update_changes_subscription_identity(&update) {
@@ -775,53 +932,65 @@ impl MultiTokenManager {
             anyhow::bail!("账号不存在: {}", id);
         }
 
-        // 如果 refreshToken 变更，需要重新验证
-        let needs_revalidation = update.refresh_token.is_some();
+        if let Some(value) = &update.machine_id {
+            update.machine_id = Some(machine_id::normalize_machine_id(value).ok_or_else(|| {
+                anyhow::anyhow!("machineId 格式无效，请提供 64 位十六进制字符串或 UUID")
+            })?);
+        }
+
+        if let Some(proxy_url) = &update.proxy_url {
+            let mut preview = KiroCredentials {
+                proxy_url: Some(proxy_url.clone()),
+                proxy_username: update.proxy_username.clone(),
+                proxy_password: update.proxy_password.clone(),
+                ..Default::default()
+            };
+            if super::proxy_routes::normalize_manual_proxy(&mut preview)? {
+                update.proxy_url = Some(preview.proxy_url.unwrap_or_default());
+                if preview.proxy_username.is_some() {
+                    update.proxy_username = preview.proxy_username;
+                }
+                if preview.proxy_password.is_some() {
+                    update.proxy_password = preview.proxy_password;
+                }
+            }
+        }
+
+        // 试刷新按完整更新预览发起，同时在替换刷新材料前固定原账号指纹。
+        // 新 clientId / IdC clientSecret 必须实际刷新验证，不能因 accessToken 尚有效而跳过。
+        let mut temp_cred = {
+            let entries = self.entries.lock();
+            let entry = entries.iter().find(|e| e.id == id).unwrap();
+            let mut cred = entry.credentials.clone();
+            machine_id::ensure_fixed_machine_id(&mut cred, &self.config);
+            if let Some(ref rt) = update.refresh_token {
+                cred.refresh_token = Some(rt.clone());
+            }
+            Self::apply_update_fields(&mut cred, &update);
+            cred
+        };
+        let needs_revalidation = Self::update_requires_revalidation(&update, &temp_cred);
 
         if needs_revalidation {
-            // 先构建临时账号用于验证
-            let temp_cred = {
-                let entries = self.entries.lock();
-                let entry = entries.iter().find(|e| e.id == id).unwrap();
-                let mut cred = entry.credentials.clone();
-                if let Some(ref rt) = update.refresh_token {
-                    cred.refresh_token = Some(rt.clone());
-                }
-                if let Some(ref am) = update.auth_method {
-                    cred.auth_method = Some(am.clone());
-                }
-                if let Some(ref ci) = update.client_id {
-                    cred.client_id = Some(ci.clone());
-                }
-                if let Some(ref cs) = update.client_secret {
-                    cred.client_secret = Some(cs.clone());
-                }
-                if let Some(ref ar) = update.auth_region {
-                    cred.auth_region = if ar.is_empty() {
-                        None
-                    } else {
-                        Some(ar.clone())
-                    };
-                }
-                if let Some(ref ar) = update.api_region {
-                    cred.api_region = if ar.is_empty() {
-                        None
-                    } else {
-                        Some(ar.clone())
-                    };
-                }
-                cred
-            };
-
-            let effective_proxy = temp_cred.effective_proxy(self.proxy.as_ref());
-            let validated =
-                refresh_token(&temp_cred, &self.config, effective_proxy.as_ref()).await?;
+            self.prepare_proxy_binding(&mut temp_cred).await?;
+            let mut proxy_reservation = self.reserve_new_proxy_binding(&mut temp_cred)?;
+            let validated = self
+                .validate_candidate_with_proxy(&mut temp_cred, &mut proxy_reservation)
+                .await?;
 
             // 更新账号（保留验证后的 access_token 和 expires_at）
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.invalidate_recovery();
                 entry.credentials.access_token = validated.access_token;
+                entry.credentials.sso_access_token = validated.sso_access_token;
+                entry.credentials.machine_id = validated.machine_id;
                 entry.credentials.expires_at = validated.expires_at;
+                entry.credentials.proxy_pool_id = validated.proxy_pool_id;
+                entry.credentials.proxy_pool_generation = validated.proxy_pool_generation;
+                entry.credentials.proxy_url = validated.proxy_url;
+                entry.credentials.proxy_username = validated.proxy_username;
+                entry.credentials.proxy_password = validated.proxy_password;
                 if let Some(profile_arn) = validated.profile_arn {
                     entry.credentials.profile_arn = Some(profile_arn);
                 }
@@ -834,15 +1003,32 @@ impl MultiTokenManager {
                 entry.failure_count = 0;
             }
         } else {
-            // 不涉及 refreshToken 变更，直接更新配置字段
+            // 不涉及需验证的凭据字段，直接更新配置字段
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.invalidate_recovery();
+                machine_id::ensure_fixed_machine_id(&mut entry.credentials, &self.config);
                 Self::apply_update_fields(&mut entry.credentials, &update);
             }
         }
 
+        // 账号配置（如 profileArn、refreshToken）可能改变其模型权限，旧探测结果作废
+        self.invalidate_model_support(id);
+
         self.persist_credentials()?;
-        tracing::info!("成功更新账号 #{}", id);
+        self.save_stats();
+        // 只记录字段名不记录值：clientSecret / refreshToken / proxyPassword 等是敏感信息，
+        // 事后排查「是否有人改过这些字段」时靠这行日志
+        tracing::info!(
+            "成功更新账号 #{}，涉及字段: [{}]{}",
+            id,
+            Self::updated_field_names(&update).join(", "),
+            if needs_revalidation {
+                "（已用新凭据试刷新验证）"
+            } else {
+                ""
+            }
+        );
         Ok(())
     }
 
@@ -852,6 +1038,27 @@ impl MultiTokenManager {
         update: &crate::admin::types::UpdateCredentialRequest,
     ) {
         let identity_updated = Self::update_changes_subscription_identity(update);
+        if cred.proxy_pool_id.is_some()
+            && update.proxy_url.is_none()
+            && (update
+                .proxy_username
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+                || update
+                    .proxy_password
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty()))
+        {
+            cred.proxy_pool_id = None;
+            cred.proxy_pool_generation = None;
+        }
+        let same_manual_endpoint = cred.proxy_pool_id.is_none()
+            && update.proxy_url.as_deref().is_some_and(|value| {
+                cred.proxy_url.as_deref().is_some_and(|old| {
+                    crate::http_client::safe_proxy_address(value)
+                        == crate::http_client::safe_proxy_address(old)
+                })
+            });
 
         if let Some(ref am) = update.auth_method {
             cred.auth_method = Some(canonicalize_auth_method_value(am).to_string());
@@ -892,11 +1099,7 @@ impl MultiTokenManager {
             };
         }
         if let Some(ref mi) = update.machine_id {
-            cred.machine_id = if mi.is_empty() {
-                None
-            } else {
-                Some(mi.clone())
-            };
+            cred.machine_id = Some(mi.clone());
         }
         if let Some(ref em) = update.email {
             cred.email = if em.is_empty() {
@@ -920,20 +1123,32 @@ impl MultiTokenManager {
             };
         }
         if let Some(ref pu) = update.proxy_url {
-            cred.proxy_url = if pu.is_empty() {
-                None
+            if pu.is_empty() && cred.proxy_pool_id.is_some() {
+                // 管理代理的编辑表单保持空白：保留现有稳定绑定及认证材料。
             } else {
-                Some(pu.clone())
-            };
+                cred.proxy_pool_id = None;
+                cred.proxy_pool_generation = None;
+                cred.proxy_url = if pu.is_empty() {
+                    None
+                } else {
+                    Some(pu.clone())
+                };
+            }
         }
-        if let Some(ref pu) = update.proxy_username {
+        if let Some(ref pu) = update.proxy_username
+            && cred.proxy_pool_id.is_none()
+            && (!same_manual_endpoint || !pu.is_empty() || cred.proxy_username.is_none())
+        {
             cred.proxy_username = if pu.is_empty() {
                 None
             } else {
                 Some(pu.clone())
             };
         }
-        if let Some(ref pp) = update.proxy_password {
+        if let Some(ref pp) = update.proxy_password
+            && cred.proxy_pool_id.is_none()
+            && (!same_manual_endpoint || !pp.is_empty() || cred.proxy_password.is_none())
+        {
             cred.proxy_password = if pp.is_empty() {
                 None
             } else {
@@ -982,6 +1197,8 @@ impl MultiTokenManager {
                     .unwrap_or(0);
             }
         }
+
+        self.invalidate_model_support(id);
 
         // 持久化更改
         self.persist_credentials()?;

@@ -335,7 +335,7 @@ pub(crate) mod tests {
                 crate::model::config::Config::default(),
                 vec![KiroCredentials {
                     refresh_token: Some("current-refresh-token".to_string()),
-                    machine_id: Some("old-machine-id".to_string()),
+                    machine_id: Some("a".repeat(64)),
                     ..Default::default()
                 }],
                 None,
@@ -351,7 +351,7 @@ pub(crate) mod tests {
                 .update_credential(
                     1,
                     crate::admin::types::UpdateCredentialRequest {
-                        machine_id: Some("new-machine-id".to_string()),
+                        machine_id: Some("b".repeat(64)),
                         ..Default::default()
                     },
                 )
@@ -369,7 +369,7 @@ pub(crate) mod tests {
             .expect("身份更新应成功");
         assert_eq!(
             manager.entries.lock()[0].credentials.machine_id.as_deref(),
-            Some("new-machine-id")
+            Some("b".repeat(64).as_str())
         );
     }
 
@@ -647,5 +647,292 @@ pub(crate) mod tests {
         }
         // 非 HTTP 状态错误（网络等）不换区域；不依赖文案：含“权限不足”字样的普通错误同样不触发
         assert!(!should_try_next_region(&anyhow::anyhow!("权限不足")));
+    }
+
+    #[test]
+    fn test_update_requires_revalidation_covers_client_credentials() {
+        use crate::admin::types::UpdateCredentialRequest as Req;
+        let requires = MultiTokenManager::update_requires_revalidation;
+        let with_method = |m: &str| KiroCredentials {
+            auth_method: Some(m.to_string()),
+            ..Default::default()
+        };
+        let idc = with_method("idc");
+        let ext = with_method("external_idp");
+        let social = with_method("social");
+        let secret = Req {
+            client_secret: Some("secret".into()),
+            ..Default::default()
+        };
+
+        assert!(requires(
+            &Req {
+                refresh_token: Some("rt".into()),
+                ..Default::default()
+            },
+            &social
+        ));
+        // issue #58：IdC 账号只改 clientSecret 也要先试刷新，错误值不能静默落盘
+        assert!(requires(&secret, &idc));
+        // clientSecret 只在 IdC 刷新里参与请求：external_idp / social 试刷新验证不到它
+        assert!(!requires(&secret, &ext));
+        assert!(!requires(&secret, &social));
+        // authMethod 省略时按 clientId + clientSecret 是否齐全推断（与 refresh_token 一致）
+        assert!(requires(
+            &secret,
+            &KiroCredentials {
+                client_id: Some("id".into()),
+                client_secret: Some("secret".into()),
+                ..Default::default()
+            }
+        ));
+        // clientId 对 IdC / external_idp 都参与请求
+        let id = Req {
+            client_id: Some("id".into()),
+            ..Default::default()
+        };
+        assert!(requires(&id, &idc));
+        assert!(requires(&id, &ext));
+        // 空串是清除，不涉及新凭据；其他字段更新同样不验证
+        assert!(!requires(
+            &Req {
+                client_secret: Some(String::new()),
+                client_id: Some(String::new()),
+                ..Default::default()
+            },
+            &idc
+        ));
+        assert!(!requires(
+            &Req {
+                nickname: Some("n".into()),
+                proxy_password: Some("p".into()),
+                ..Default::default()
+            },
+            &idc
+        ));
+    }
+
+    fn external_idp_manager(token_endpoint: String) -> MultiTokenManager {
+        MultiTokenManager::new(
+            crate::model::config::Config::default(),
+            vec![KiroCredentials {
+                auth_method: Some("external_idp".to_string()),
+                refresh_token: Some("short-refresh-token".to_string()),
+                client_id: Some("client-id".to_string()),
+                client_secret: Some("real-secret".to_string()),
+                token_endpoint: Some(token_endpoint),
+                ..Default::default()
+            }],
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// 覆盖边界：本用例走 external_idp（可用本地假 token 端点），它的刷新请求带 clientId 但
+    /// 不带 clientSecret，所以这里验证的是「试刷新失败 → 拒绝写入且原值不变」这条链路本身。
+    /// IdC 路径（clientSecret 真正生效的那条）的端点硬编码为 AWS OIDC 地址，无法本地模拟，
+    /// 「新 clientSecret 被上游校验」这一点没有自动化测试覆盖。
+    #[tokio::test]
+    async fn test_update_client_id_rejected_when_trial_refresh_fails() {
+        let body = r#"{"error":"invalid_client","error_description":"Invalid client provided"}"#;
+        let endpoint = spawn_single_response_server(401, body).await;
+        let manager = external_idp_manager(endpoint);
+        let cooldown = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let (original, generation) = {
+            let mut entries = manager.entries.lock();
+            let entry = &mut entries[0];
+            // A still-valid access token must not bypass validation of replacement clientId.
+            entry.credentials.access_token = Some("synthetic-still-valid-token".into());
+            entry.credentials.expires_at =
+                Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+            entry.credentials.proxy_url = Some("direct".into());
+            entry.credentials.disabled = true;
+            entry.disabled = true;
+            entry.disabled_reason = Some(crate::kiro::token_manager::DisabledReason::QuotaExceeded);
+            entry.failure_count = 1;
+            entry.refresh_failure_count = 2;
+            entry.recovery_failures = 3;
+            entry.recovery_next_probe_at = Some(cooldown);
+            (
+                serde_json::to_value(&entry.credentials).unwrap(),
+                entry.recovery_generation,
+            )
+        };
+
+        let err = manager
+            .update_credential(
+                1,
+                crate::admin::types::UpdateCredentialRequest {
+                    client_id: Some("wrong-client-id".to_string()),
+                    machine_id: Some("b".repeat(64)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("新 clientId 试刷新失败时应拒绝更新");
+        assert!(
+            err.to_string().contains("401") && err.to_string().contains("invalid_client"),
+            "应保留上游状态码与原文便于排查，实际: {err}"
+        );
+        assert_eq!(
+            manager.entries.lock()[0].credentials.client_id.as_deref(),
+            Some("client-id"),
+            "验证失败不应改动内存中的凭据"
+        );
+        let entries = manager.entries.lock();
+        let entry = &entries[0];
+        assert_eq!(serde_json::to_value(&entry.credentials).unwrap(), original);
+        assert_eq!(entry.recovery_generation, generation);
+        assert_eq!(entry.recovery_next_probe_at, Some(cooldown));
+        assert_eq!(entry.recovery_failures, 3);
+        assert_eq!(entry.failure_count, 1);
+        assert_eq!(entry.refresh_failure_count, 2);
+        assert!(entry.disabled);
+        assert_eq!(
+            entry.disabled_reason,
+            Some(crate::kiro::token_manager::DisabledReason::QuotaExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_client_id_trial_refresh_pins_machine_id_and_preserves_manual_disable() {
+        let endpoint = spawn_single_response_server(
+            200,
+            r#"{"access_token":"synthetic-new-access","refresh_token":"synthetic-rotated-refresh","expires_in":3600}"#,
+        )
+        .await;
+        let manager = external_idp_manager(endpoint);
+        let original_machine_id = {
+            let mut entries = manager.entries.lock();
+            let entry = &mut entries[0];
+            entry.credentials.proxy_url = Some("direct".into());
+            entry.credentials.disabled = true;
+            entry.disabled = true;
+            entry.disabled_reason = Some(crate::kiro::token_manager::DisabledReason::Manual);
+            entry.credentials.machine_id.clone()
+        };
+        manager
+            .update_credential(
+                1,
+                crate::admin::types::UpdateCredentialRequest {
+                    client_id: Some("synthetic-new-client".into()),
+                    // Blank managed/manual form defaults must not introduce a new proxy route.
+                    proxy_url: Some("direct".into()),
+                    proxy_username: Some(String::new()),
+                    proxy_password: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let entries = manager.entries.lock();
+        let entry = &entries[0];
+        assert_eq!(
+            entry.credentials.client_id.as_deref(),
+            Some("synthetic-new-client")
+        );
+        assert_eq!(
+            entry.credentials.access_token.as_deref(),
+            Some("synthetic-new-access")
+        );
+        assert_eq!(
+            entry.credentials.refresh_token.as_deref(),
+            Some("synthetic-rotated-refresh")
+        );
+        assert_eq!(entry.credentials.machine_id, original_machine_id);
+        assert_eq!(entry.credentials.proxy_url.as_deref(), Some("direct"));
+        assert!(entry.credentials.proxy_pool_id.is_none());
+        assert!(entry.credentials.disabled && entry.disabled);
+        assert_eq!(
+            entry.disabled_reason,
+            Some(crate::kiro::token_manager::DisabledReason::Manual)
+        );
+        assert!(entry.recovery_next_probe_at.is_none());
+        assert_eq!(entry.recovery_generation, 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_client_secret_skips_trial_refresh_for_non_idc() {
+        // external_idp 不使用 clientSecret：token 端点不可达也应直接成功，不做空转的试刷新
+        let manager = external_idp_manager("http://127.0.0.1:1/token".to_string());
+
+        manager
+            .update_credential(
+                1,
+                crate::admin::types::UpdateCredentialRequest {
+                    client_secret: Some("new-secret".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("非 IdC 账号改 clientSecret 不需要试刷新");
+        assert_eq!(
+            manager.entries.lock()[0]
+                .credentials
+                .client_secret
+                .as_deref(),
+            Some("new-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trial_refresh_uses_proxy_from_same_update() {
+        // 试刷新必须按「更新后」的配置发起：同一请求里把账号代理换成不可达地址时，
+        // 验证应走新代理并失败，而不是借旧的直连通过后把一个不可用的配置落盘。
+        let body = r#"{"access_token":"new-access-token","expires_in":3600}"#;
+        let endpoint = spawn_single_response_server(200, body).await;
+        let manager = external_idp_manager(endpoint);
+
+        manager
+            .update_credential(
+                1,
+                crate::admin::types::UpdateCredentialRequest {
+                    client_id: Some("new-client-id".to_string()),
+                    proxy_url: Some("http://127.0.0.1:1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("新代理不可达时试刷新应失败");
+        let entries = manager.entries.lock();
+        assert_eq!(entries[0].credentials.proxy_url, None, "失败不应落盘新代理");
+        assert_eq!(
+            entries[0].credentials.client_id.as_deref(),
+            Some("client-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_clearing_client_secret_skips_trial_refresh() {
+        // 清除（空串）与无关字段更新不触发试刷新：token 端点不可达也应成功
+        let manager = external_idp_manager("http://127.0.0.1:1/token".to_string());
+
+        manager
+            .update_credential(
+                1,
+                crate::admin::types::UpdateCredentialRequest {
+                    client_secret: Some(String::new()),
+                    nickname: Some("renamed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("清除 clientSecret 不需要验证");
+        let entries = manager.entries.lock();
+        assert_eq!(entries[0].credentials.client_secret, None);
+        assert_eq!(entries[0].credentials.nickname.as_deref(), Some("renamed"));
+    }
+
+    #[test]
+    fn test_updated_field_names_lists_names_only() {
+        let names =
+            MultiTokenManager::updated_field_names(&crate::admin::types::UpdateCredentialRequest {
+                client_secret: Some("TOP-SECRET-VALUE".to_string()),
+                nickname: Some("n".to_string()),
+                ..Default::default()
+            });
+        assert_eq!(names, vec!["clientSecret", "nickname"]);
     }
 }

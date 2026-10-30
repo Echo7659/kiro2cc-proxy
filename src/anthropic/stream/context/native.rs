@@ -1,8 +1,8 @@
 //! Kiro 原生推理事件到 Anthropic thinking 块的转换：native reasoning 流的组装与收尾事件生成。
+
 use serde_json::json;
 
 use super::StreamContext;
-use crate::anthropic::stream::helpers::count_token_chars;
 use crate::anthropic::stream::state::SseEvent;
 use crate::kiro::model::events::ReasoningContentEvent;
 
@@ -19,9 +19,8 @@ impl StreamContext {
             thinking_enabled = self.thinking_enabled,
             "[native-thinking] received reasoningContentEvent"
         );
-        let (cn, other) = count_token_chars(&reasoning.text);
-        self.output_chars_cn += cn;
-        self.output_chars_other += other;
+        // 计费口径：缓冲全文，收尾 BPE 一次编码（见 output_tokens）
+        self.output_full_text.push_str(&reasoning.text);
         if !self.thinking_enabled || (reasoning.text.is_empty() && reasoning.signature.is_empty()) {
             return Vec::new();
         }
@@ -69,6 +68,10 @@ impl StreamContext {
                     }),
                 )
             {
+                // 仅统计被状态机接受、客户端实际收到的 thinking 文案
+                if kind == "thinking_delta" {
+                    self.accumulate_thinking(value);
+                }
                 tracing::debug!(
                     model = %self.model,
                     message_id = %self.message_id,

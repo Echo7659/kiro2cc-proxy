@@ -3,6 +3,31 @@
 #[cfg(test)]
 mod tests {
 
+    #[tokio::test]
+    async fn dropping_bridge_task_cancels_owned_capacity_instead_of_detaching_it() {
+        use super::super::super::bridge::AbortOnDropTask;
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = AbortOnDropTask(tokio::spawn(async move {
+            let _lease = permit;
+            started.send(()).unwrap();
+            futures::future::pending::<()>().await;
+        }));
+        ready.await.unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(task);
+        let released = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            semaphore.clone().acquire_owned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(released);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
     use super::super::super::bridge::{
         BridgeRoundOutcome, BridgeState, PendingSearch, body_dummy_bytes, bridge_execute_round,
         build_web_search_result_block, flush_unpaired_search_blocks, harvest_bridge_round,
@@ -105,15 +130,24 @@ mod tests {
     fn test_harvest_bridge_round_continued_pairs_result_block() {
         // Continued → 先发配对结果块（finished=false），结果块与 server_tool_use
         // 成对，且不含 error/message_stop 收尾事件
-        let mut ctx = StreamContext::new_with_thinking("claude-sonnet-4", 1000, false);
+        let mut ctx = StreamContext::new_with_thinking("claude-haiku-5-5", 53_776, false)
+            .with_prefix_estimated_tokens(53_650);
+        assert_eq!(
+            ctx.derive_report_cache_usage(53_776, Some(9.99), 0),
+            (53_776, 0, 0)
+        );
         let response = reqwest::Response::from(http::Response::new(body_dummy_bytes()));
         let outcome = BridgeRoundOutcome::Continued(
-            response,
+            response.into(),
             EventStreamDecoder::new(),
             Some(sample_search_results()),
         );
 
         let harvest = harvest_bridge_round(outcome, "tu-cont-1", &mut ctx);
+        assert_eq!(
+            ctx.derive_report_cache_usage(53_776, Some(9.99), 0),
+            (126, 0, 53_650)
+        );
         assert!(!harvest.finished, "Continued 应换入续流，finished=false");
         assert_eq!(
             harvest.events.len(),

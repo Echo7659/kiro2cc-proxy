@@ -461,7 +461,7 @@ pub async fn handle_websearch_request(
         }
     };
 
-    tracing::info!(query = %query, "处理 WebSearch 请求");
+    tracing::info!(query_chars = query.chars().count(), "处理 WebSearch 请求");
 
     // 2. 创建 MCP 请求
     let (tool_use_id, mcp_request) = create_mcp_request(&query);
@@ -497,12 +497,12 @@ pub(crate) async fn call_mcp_api(
 ) -> anyhow::Result<McpResponse> {
     let request_body = serde_json::to_string(request)?;
 
-    tracing::debug!("MCP request: {}", request_body);
+    tracing::debug!(request_bytes = request_body.len(), "MCP request serialized");
 
     let (response, _credential_id) = provider.call_mcp(&request_body, bound_ids).await?;
 
     let body = response.text().await?;
-    tracing::debug!("MCP response: {}", body);
+    tracing::debug!(response_bytes = body.len(), "MCP response received");
 
     let mcp_response: McpResponse = serde_json::from_str(&body)?;
 

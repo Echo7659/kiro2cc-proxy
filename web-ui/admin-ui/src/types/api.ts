@@ -17,6 +17,12 @@ export interface CredentialStatusItem {
   expiresAt: string | null
   authMethod: string | null
   hasProfileArn: boolean
+  /** OIDC Client ID（IdC / external_idp；非机密，编辑弹窗只读展示） */
+  clientId?: string
+  /** Profile ARN（非机密，编辑弹窗只读展示） */
+  profileArn?: string
+  /** 账号级 Machine ID（非机密，编辑弹窗只读展示） */
+  machineId?: string
   email?: string
   nickname?: string
   /** 登录来源 / IdP 标识（social 账号为 Google / GitHub；external_idp 为 AzureAD 等） */
@@ -30,14 +36,18 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  proxyPoolId?: number | null
+  proxyRouteStatus?: 'healthy' | 'pending' | 'unavailable' | null
+  proxyMode?: 'pool' | 'manual' | 'direct' | 'global'
+  effectiveProxyUrl?: string | null
   /** 账号级 thinking adaptive 注入开关（客户端请求 thinking: adaptive 时按此开关注入 Kiro） */
   thinkingAdaptive: boolean
   healthStatus: 'healthy' | 'warning' | 'degraded' | 'unhealthy' | 'disabled'
   throttleCount: number
   /**
    * 禁用原因；与 `disabled` 配套使用。
-   * - quota_exceeded：上游 402 MONTHLY_REQUEST_COUNT 触发，跨自然月自动恢复
-   * - 其他：手动 / 连续失败 / refreshToken 撤销 等需人工介入
+   * - quota_exceeded / 连续失败：冷却后只读验活，通过才自动恢复
+   * - 手动禁用、refreshToken 撤销、配置缺失不自动恢复
    */
   disabledReason?:
     | 'manual'
@@ -45,6 +55,40 @@ export interface CredentialStatusItem {
     | 'quota_exceeded'
     | 'invalid_refresh_token'
     | 'too_many_refresh_failures'
+    | 'profile_arn_missing'
+  nextRecoveryProbeAt?: string
+  recoveryProbeInFlight?: boolean
+  recoveryFailures?: number
+}
+
+export interface ProxySummary {
+  id: number
+  /** Safe gateway address; never contains authentication userinfo. */
+  url: string
+  usernameMasked: string | null
+  hasAuth: boolean
+  enabled: boolean
+  status: 'unknown' | 'healthy' | 'unhealthy'
+  lastCheckedAt: string | null
+  latencyMs: number | null
+  exitIp: string | null
+  failureCount: number
+  cooldownUntil: string | null
+  checking: boolean
+  assignedAccounts: number
+  assignedAccountIds: number[]
+}
+
+export interface ProxiesResponse {
+  proxies: ProxySummary[]
+  configured: boolean
+}
+
+export interface ImportProxiesResponse {
+  imported: number
+  duplicates: number
+  rejected: number
+  errors: { line: number; message: string }[]
 }
 
 // 余额响应
@@ -199,6 +243,8 @@ export interface ModelItem {
   rate_multiplier?: number | null
   /** 模型发布日期（YYYY-MM-DD）；未登记为 null，前端据此实时计算「最近新增」标记 */
   released_at?: string | null
+  /** 官方模型描述；上游未返回或回退静态表时为 null */
+  description?: string | null
 }
 
 export interface ModelsResponse {
@@ -251,6 +297,11 @@ export interface UsageRecord {
   credentialLabel?: string
   clientIp?: string
   effort?: string
+  firstTokenMs?: number
+  durationMs?: number
+  thinkingTokenCount?: number
+  isStream?: boolean
+  userAgent?: string
 }
 
 // 分页原始记录响应
@@ -269,12 +320,40 @@ export interface DailySummary {
   totalCost: number
   totalCredits: number
   totalCreditsSaved?: number
+  totalInputTokens: number      // 累计输入 tokens（含 cache 命中部分）
+  totalOutputTokens: number
+  totalCacheReadTokens: number  // 累计 cache 命中的输入 tokens
+}
+
+// 单账号全部留存记录的用量汇总（后端 /credentials/:id/usage/summary，不限日期）
+export interface CredentialUsageSummary {
+  credentialId: number
+  totalRequests: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCost: number
+  totalCredits: number
+  totalCreditsSaved?: number
+  totalCacheReadTokens: number
 }
 
 // 单账号在某 CST 日期的用量汇总（后端 /credentials/:id/usage/today）
 export interface CredentialDaySummary {
   date: string           // "2026-06-26" CST (UTC+8)
   credentialId: number
+  totalRequests: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCost: number
+  totalCredits: number
+  totalCreditsSaved?: number
+}
+
+// 单账号在 CST 最近 N 天（含今日）的用量汇总（后端 /credentials/:id/usage/7days、/30days）
+export interface CredentialRangeSummary {
+  credentialId: number
+  fromDate: string       // "2026-10-16" CST，区间起始日（含）
+  toDate: string         // 区间结束日（含），恒为今日
   totalRequests: number
   totalInputTokens: number
   totalOutputTokens: number
@@ -317,4 +396,22 @@ export interface FailureLogsResponse {
   page: number
   pageSize: number
   totalPages: number
+}
+
+// 单个 dump 文件元数据（后端 /dump-kiro-body/files，字段为 camelCase 序列化）
+export interface DumpFileMeta {
+  name: string
+  sizeBytes: number
+  /** 取文件名内毫秒时间戳，不取文件系统 mtime（后端决策 9） */
+  createdAtMs: number
+}
+
+// dump 文件清单响应（后端 /dump-kiro-body/files）
+export interface DumpFilesResponse {
+  files: DumpFileMeta[]
+  totalBytes: number
+  /** 后端保留的 dump 文件数上限，用于向管理员展示滚动清理语义 */
+  maxFiles: number
+  /** 归档总量上限，前端据此判断是否提示截断，不硬编码阈值 */
+  maxArchiveBytes: number
 }

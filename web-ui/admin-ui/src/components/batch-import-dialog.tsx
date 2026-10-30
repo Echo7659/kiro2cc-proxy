@@ -44,6 +44,9 @@ interface CredentialInput {
   profileArn?: string
   priority?: number
   machineId?: string
+  proxyUrl?: string
+  proxyUsername?: string
+  proxyPassword?: string
   /** 登录来源（仅 Google / GitHub 会被归一化后写入） */
   provider?: string
 }
@@ -83,6 +86,15 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   const { mutateAsync: addCredential } = useAddCredential()
   const { mutateAsync: setDisabled } = useSetDisabled()
 
+  function parseImportJson(text: string) {
+    try {
+      return JSON.parse(text)
+    } catch {
+      // Native SyntaxError messages can quote input containing proxy credentials.
+      throw new Error(t('credentials.importJsonSyntaxError'))
+    }
+  }
+
   const resetForm = () => {
     setJsonInput('')
     setProgress({ current: 0, total: 0 })
@@ -94,7 +106,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
   const handleBatchImport = async () => {
     try {
       // 1. 解析 JSON
-      const parsed = JSON.parse(jsonInput)
+      const parsed = parseImportJson(jsonInput)
       let credentials: CredentialInput[]
       if (Array.isArray(parsed)) {
         credentials = parsed
@@ -105,6 +117,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             refreshToken: a.credentials?.refreshToken,
             email: a.email || a.nickname,
             machineId: a.machineId,
+            proxyUrl: a.proxyUrl ?? a.credentials?.proxyUrl,
+            proxyUsername: a.proxyUsername ?? a.credentials?.proxyUsername,
+            proxyPassword: a.proxyPassword ?? a.credentials?.proxyPassword,
             authRegion: a.credentials?.region,
             authMethod: a.credentials?.authMethod,
             clientId: a.credentials?.clientId || undefined,
@@ -210,6 +225,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             profileArn: cred.profileArn?.trim() || undefined,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
+            proxyUrl: cred.proxyUrl?.trim() || undefined,
+            proxyUsername: cred.proxyUsername || undefined,
+            proxyPassword: cred.proxyPassword || undefined,
             provider: cred.provider,
             disabled: true,
           })
@@ -352,7 +370,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
   const handleFormat = () => {
     try {
-      setJsonInput(JSON.stringify(JSON.parse(jsonInput), null, 2))
+      setJsonInput(JSON.stringify(parseImportJson(jsonInput), null, 2))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       toast.error(t('credentials.toastJsonError', { message }))
@@ -436,12 +454,13 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2.5">
             {t('credentials.batchImportDialogTitle')}
-            <span className="rounded-[8px] border border-sky-100 bg-sky-100 px-3 py-2 text-[11px] font-medium tracking-[0.2px] text-sky-700 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-400">
+            <span className="rounded-[8px] border border-transparent bg-brand-soft px-3 py-2 text-[11px] font-medium tracking-[0.2px] text-brand">
               {t('credentials.importBadge')}
             </span>
           </DialogTitle>
         </DialogHeader>
 
+        <p className="rounded-[8px] border border-brand-line bg-brand-soft p-3 text-[12px] leading-relaxed text-ink-2">{t('proxies.accountImportHint')}</p>
         <div className="flex-1 overflow-y-auto space-y-4 pb-4">
           <div className="space-y-2">
             {/* 快捷工具栏 */}
@@ -493,7 +512,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              className={`relative rounded-[8px] border bg-surface-2 transition-colors focus-within:border-brand ${
+              className={`relative rounded-[8px] border-[0.5px] bg-surface-2 transition-colors focus-within:border-brand ${
                 dragActive ? 'border-brand' : 'border-hairline-2'
               }`}
             >
@@ -529,9 +548,9 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             </div>
 
             {/* 琥珀色验活规则提示卡片 */}
-            <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900/60 dark:bg-amber-950/40">
-              <Lightbulb className="h-3.5 w-3.5 shrink-0 text-amber-500 dark:text-amber-400" />
-              <p className="text-[11px] font-medium leading-[1.55] text-amber-600 dark:text-amber-500/80">
+            <div className="flex items-center gap-2 rounded-md border border-transparent bg-warn-soft px-3 py-2">
+              <Lightbulb className="h-3.5 w-3.5 shrink-0 text-warn" />
+              <p className="text-[11px] font-medium leading-[1.55] text-warn">
                 {t('credentials.batchImportHint')}
               </p>
             </div>
@@ -578,7 +597,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               </div>
 
               {/* 结果列表 */}
-              <div className="max-h-[300px] divide-y divide-hairline overflow-y-auto rounded-[8px] border border-hairline">
+              <div className="max-h-[300px] divide-y-[0.5px] divide-hairline overflow-y-auto rounded-[8px] border border-transparent">
                 {results.map((result) => (
                   <div key={result.index} className="p-3">
                     <div className="flex items-start gap-3">

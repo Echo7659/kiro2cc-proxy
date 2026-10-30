@@ -20,8 +20,8 @@ use bytes::Bytes;
 use super::bridge::build_bridge_context;
 use super::error::parse_messages_request;
 use super::helpers::{
-    extract_client_ip, is_suggestion_mode_request, override_thinking_from_model_name,
-    resolve_thinking_enabled, suggestion_mode_response,
+    extract_client_ip, extract_user_agent, is_suggestion_mode_request,
+    override_thinking_from_model_name, resolve_thinking_enabled, suggestion_mode_response,
 };
 use super::nonstream::handle_non_stream_request;
 use super::stream::handle_stream_request;
@@ -54,7 +54,7 @@ pub async fn post_messages(
             message_count = %payload.messages.len(),
             "拦截 Suggestion Mode 输入建议请求，返回空响应（不转发上游）"
         );
-        return suggestion_mode_response(payload.stream);
+        return suggestion_mode_response(payload.stream, &payload.model);
     }
 
     tracing::info!(
@@ -146,6 +146,7 @@ pub async fn post_messages(
     let is_compact_request = conversion_result.is_compact_request;
     // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
     let thinking_adaptive_requested = conversion_result.thinking_adaptive_requested;
+    let prefix_cached = conversion_result.prefix_cached;
 
     // web_search server tool 桥接上下文（D5/D7：未携带时为 None，零行为变化）
     // 必须在 KiroRequest 构建（conversation_state 被 move）前构造
@@ -154,6 +155,9 @@ pub async fn post_messages(
         state.profile_arn.clone(),
         bound_ids.clone(),
     );
+
+    // 会话 conversationId（cache-miss 诊断用）；须在 conversation_state move 前取出
+    let conversation_id = Some(conversion_result.conversation_state.conversation_id.clone());
 
     // 构建 Kiro 请求
     let kiro_request = KiroRequest {
@@ -179,12 +183,36 @@ pub async fn post_messages(
 
     // 请求体可能包含 API Key 与敏感上下文，禁止整包入日志（cr-result C3）
 
-    // 临时取证：KIRO_DUMP_BODY=1 时把最终发往 Kiro 的 body 写入独立文件（定位后删除）
-    if std::env::var_os("KIRO_DUMP_BODY").is_some_and(|v| v == "1") {
-        dump_kiro_request_body(&request_body);
+    // 临时取证：dump_kiro_body 配置或 KIRO_DUMP_BODY=1 时把最终发往 Kiro 的 body 写入独立文件（定位后关闭）。
+    // dump 涉及目录扫描/排序/删除等同步磁盘 IO，整体挪入 spawn_blocking，不阻塞请求关键路径；
+    // 仅在本函数调用一次（provider 层故障转移重试不会重复触发），重试不会产生重复文件
+    if kiro_body_dump_enabled() || std::env::var_os("KIRO_DUMP_BODY").is_some_and(|v| v == "1") {
+        let request_body_owned = request_body.to_string();
+        tokio::task::spawn_blocking(move || dump_kiro_request_body(&request_body_owned));
     }
 
     // 构造 fingerprint profile（在消耗 payload 前 clone system/messages）
+    // 断点缓存记账：按原始 body 的 cache_control 断点 plan（类型化 payload 已丢弃 cache_control）
+    // 缓存按 API Key 隔离（无 Key 上下文时归入同一匿名域）；模型取映射后的 Kiro ID，
+    // 同一模型的不同写法（claude-opus-4-6 / claude-opus-4.6）共享缓存
+    let cache_accounting = match state.breakpoint_cache.as_ref() {
+        Some(cache) => {
+            let tenant = identity
+                .as_ref()
+                .map_or_else(|| "anon".to_string(), |ext| format!("key:{}", ext.0.id));
+            let kiro_model = crate::anthropic::converter::map_model(&payload.model)
+                .unwrap_or_else(|| payload.model.clone());
+            crate::cache::breakpoint::CacheAccounting::from_request(
+                cache,
+                body.clone(),
+                tenant,
+                kiro_model,
+            )
+            .await
+        }
+        None => None,
+    };
+
     let fp_tracker = state.fingerprint_tracker.clone();
     let fp_profile = fp_tracker.as_ref().map(|_| {
         crate::cache::fingerprint::FingerprintTracker::build_profile_with_tools(
@@ -195,21 +223,19 @@ pub async fn post_messages(
     });
 
     // 估算"缓存前缀" token 数（system + tools + history 除最后一条 user 外的全部）
-    // 必须在 count_all_tokens 消费 payload 之前先借用计算。
-    let prefix_estimated_tokens = {
-        let n = payload.messages.len();
-        let prior: &[_] = if n > 0 {
-            &payload.messages[..n - 1]
-        } else {
-            &[]
-        };
-        token::count_prefix_tokens(payload.system.as_deref(), prior, payload.tools.as_deref())
-            as i32
-    };
+    // 必须在 count_all_tokens 消费 payload 之前先借用计算（口径与门控见 helpers::estimate_prefix_tokens）
+    let (raw_prefix_tokens, prefix_estimated_tokens) =
+        super::helpers::estimate_prefix_tokens(&payload, prefix_cached);
 
     // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
+    // credits 汇总行：须在 payload.messages / payload.tools 被 count_all_tokens 消费前判定
+    let credits_footer = crate::anthropic::stream::credits_footer_request(
+        &headers,
+        &payload.messages,
+        payload.tools.as_ref().is_some_and(|t| !t.is_empty()),
+    );
     // 每请求仅此一条 thinking 状态日志（流式 token 转发阶段不再输出）。
     // 双维度区分"客户端请求"与"实际生效"：
     // - 请求：客户端是否携带 thinking（enabled/adaptive），未携带 = 关闭
@@ -249,13 +275,14 @@ pub async fn post_messages(
         payload.system,
         payload.messages,
         payload.tools,
-        prefix_estimated_tokens as u64,
+        raw_prefix_tokens,
     ) as i32;
 
     // 提取用量追踪信息
     let api_key_id = identity.map(|ext| ext.0.id);
     let usage_tracker = state.usage_tracker.clone();
     let client_ip = extract_client_ip(&headers, Some(&addr));
+    let user_agent = extract_user_agent(&headers);
 
     // 计算 prompt cache 模拟 usage（message_start 早期值；终值会被降级链覆盖）
     let prompt_cache_usage = crate::cache::PromptCacheUsage::from_ratio_config(
@@ -276,7 +303,8 @@ pub async fn post_messages(
 
     // 思考文本化仅对 Claude Code 客户端生效（OpenAI 兼容端点等保持原生 thinking 语义）
     let thinking_as_text = crate::anthropic::stream::thinking_as_text_enabled()
-        && crate::anthropic::stream::is_claude_code_client(&headers);
+        .then(|| crate::anthropic::stream::thinking_text_style(&headers))
+        .flatten();
 
     if payload.stream {
         // 流式响应
@@ -298,6 +326,10 @@ pub async fn post_messages(
             bridge_ctx,
             effort,
             thinking_as_text,
+            user_agent,
+            cache_accounting,
+            conversation_id,
+            credits_footer,
         )
         .await
     } else {
@@ -321,46 +353,69 @@ pub async fn post_messages(
             bridge_ctx,
             effort,
             thinking_enabled,
+            user_agent,
+            cache_accounting,
+            conversation_id,
         )
         .await
     }
 }
 
-// 临时取证：把最终发往 Kiro 的完整请求体落盘，仅 KIRO_DUMP_BODY=1 时启用。
-// 文件落在 app/config/kiro-body-dump/（gitignore 目录），权限 0600，定位后删除。
+// 临时取证：把最终发往 Kiro 的完整请求体落盘，dump_kiro_body 配置或 KIRO_DUMP_BODY=1 时启用。
+// 文件落在 app/config/kiro-body-dump/（gitignore 目录），权限 0600，定位后关闭。
+
+/// Kiro 请求体落盘取证开关（config `dumpKiroBody`，默认 false）。
+///
+/// 用 AtomicBool 全局量承载（同 client_token_passthrough 模式）：
+/// 判定点在无 &self 的自由函数里，main.rs 启动时按 config 初始化；
+/// 环境变量 `KIRO_DUMP_BODY=1` 仍兼容生效（OR 语义）。
+static KIRO_BODY_DUMP_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 设置 Kiro 请求体落盘开关（main.rs 启动时按 config 调用）。
+pub fn set_kiro_body_dump_enabled(enabled: bool) {
+    KIRO_BODY_DUMP_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 读取 Kiro 请求体落盘开关当前值。
+pub fn kiro_body_dump_enabled() -> bool {
+    KIRO_BODY_DUMP_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn dump_kiro_request_body(request_body: &str) {
-    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::path::Path::new("app/config/kiro-body-dump");
-    if std::fs::create_dir_all(dir).is_err() {
-        tracing::warn!("[BODY-DUMP] 创建 dump 目录失败");
-        return;
-    }
+    // 毫秒时间戳远小于 u64 上限，收敛到 u64 与 dump 模块命名口径一致
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or_default();
-    let path = dir.join(format!("body-{ts}.json"));
-    // 0600 权限仅 Unix 有意义；Windows 依赖目录 ACL（用户目录默认私有）
-    #[cfg(unix)]
-    let open = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true).mode(0o600);
-        o
-    };
-    #[cfg(not(unix))]
-    let open = {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        o
-    };
-    match open
-        .open(&path)
-        .and_then(|mut f| f.write_all(request_body.as_bytes()))
-    {
-        Ok(()) => tracing::info!("[BODY-DUMP] 已写入 {}", path.display()),
+    // 目录创建、滚动清理（含与列表端点同源的命名谓词）、0600 权限与冲突重试
+    // 均由 common::dump 承担，避免此处与 admin 下载侧出现两份字面量而漂移
+    match crate::common::dump::write_dump_body_in(
+        std::path::Path::new(crate::common::dump::DUMP_DIR),
+        request_body,
+        ts,
+    ) {
+        Ok(path) => tracing::info!("[BODY-DUMP] 已写入 {}", path.display()),
         Err(e) => tracing::warn!("[BODY-DUMP] 写入失败: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod dump_switch_tests {
+    use super::*;
+
+    #[test]
+    fn test_kiro_body_dump_switch() {
+        // 单测试内完成置位/断言/还原：cargo test 默认多线程并行，
+        // 拆成两个测试会竞争进程级全局 AtomicBool，存在 flaky 风险
+        set_kiro_body_dump_enabled(false);
+        assert!(!kiro_body_dump_enabled());
+        set_kiro_body_dump_enabled(true);
+        assert!(kiro_body_dump_enabled());
+        // 还原默认，避免影响其他测试
+        set_kiro_body_dump_enabled(false);
+        assert!(!kiro_body_dump_enabled());
     }
 }

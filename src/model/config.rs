@@ -44,6 +44,11 @@ fn default_true() -> bool {
     true
 }
 
+/// 0 = 按模型使用 Anthropic 官方最小可缓存长度（见 `cache::breakpoint::min_cacheable_tokens`）
+fn default_prompt_cache_min_tokens() -> i32 {
+    0
+}
+
 fn default_fingerprint_enabled() -> bool {
     true
 }
@@ -150,6 +155,43 @@ pub struct Config {
     #[serde(default = "default_max_rpm_per_credential")]
     pub max_rpm_per_credential: u32,
 
+    /// 全局生成并发上限，许可覆盖完整上游响应体。
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+
+    /// 单账号生成并发上限，许可覆盖完整上游响应体。
+    #[serde(default = "default_max_concurrent_per_credential")]
+    pub max_concurrent_per_credential: usize,
+
+    /// 等待限流/并发准入的最长时间；超时返回 429。
+    #[serde(default = "default_upstream_admission_timeout_secs")]
+    pub upstream_admission_timeout_secs: u64,
+
+    /// 自动禁用后的首次验活等待时间。
+    #[serde(default = "default_account_recovery_cooldown_secs")]
+    pub account_recovery_cooldown_secs: u64,
+
+    /// 验活失败后指数退避的最大等待时间。
+    #[serde(default = "default_account_recovery_max_cooldown_secs")]
+    pub account_recovery_max_cooldown_secs: u64,
+
+    /// 单次只读账号验活的总超时。
+    #[serde(default = "default_account_recovery_probe_timeout_secs")]
+    pub account_recovery_probe_timeout_secs: u64,
+
+    /// 通过每条代理检查 HTTPS 连通性和出口 IP，不携带账号凭据。
+    #[serde(default = "default_proxy_health_check_url")]
+    pub proxy_health_check_url: String,
+    /// 容量等待与实际网络探测分别使用此预算，排队超时不标记故障。
+    #[serde(default = "default_proxy_health_check_timeout_secs")]
+    pub proxy_health_check_timeout_secs: u64,
+    #[serde(default = "default_proxy_health_check_interval_secs")]
+    pub proxy_health_check_interval_secs: u64,
+    #[serde(default = "default_proxy_health_check_concurrency")]
+    pub proxy_health_check_concurrency: usize,
+    #[serde(default = "default_proxy_failure_cooldown_secs")]
+    pub proxy_failure_cooldown_secs: u64,
+
     /// `/v1/models` 动态列表缓存 TTL（秒），默认 3600
     #[serde(default = "default_model_cache_ttl_secs")]
     pub model_cache_ttl_secs: u64,
@@ -163,6 +205,29 @@ pub struct Config {
     #[serde(default)]
     pub client_token_passthrough: bool,
 
+    /// 按 Anthropic cache_control 断点规则模拟缓存记账（见 `cache::breakpoint`）
+    ///
+    /// 开启后 cache_read / cache_creation 按请求里的断点、20 block 回看、TTL 计算，
+    /// 取代"除最后一条外全部算缓存读、写入恒为 0"的前缀估算。默认 false 保持既有行为。
+    #[serde(default)]
+    pub prompt_cache_accounting: bool,
+
+    /// 断点模拟最小可缓存长度的全局覆盖（token）。默认 0 = 按模型取官方值
+    /// （512 / 1024 / 2048 / 4096 不等）；> 0 时对所有模型统一使用该值
+    #[serde(default = "default_prompt_cache_min_tokens")]
+    pub prompt_cache_min_tokens: i32,
+
+    /// `/v1/models` 是否为点号模型 ID 追加官方连字符别名（如 `claude-opus-4.6` →
+    /// `claude-opus-4-6`）。供按模型列表生成映射的下游网关使用；默认 false，
+    /// 避免 Claude Code 模型选择器出现重复项
+    #[serde(default)]
+    pub models_official_aliases: bool,
+
+    /// 对客户端上报的 output_tokens 是否包含 thinking（Anthropic 官方口径为包含）。
+    /// 默认 false 保持既有行为（仅可见输出）。
+    #[serde(default)]
+    pub output_tokens_include_thinking: bool,
+
     /// Suggestion Mode 输入建议请求放行开关
     ///
     /// Claude Code 每轮主对话后会自动发起输入建议请求（末条消息以 `[SUGGESTION MODE`
@@ -175,12 +240,24 @@ pub struct Config {
     /// 思考内容文本化展示（仅 Claude Code 客户端）
     ///
     /// Claude Code 默认隐藏/折叠 thinking，长推理期间界面像卡住。开启后，出站 SSE 的
-    /// thinking 块被改写为 markdown 引用文本块，以 ANSI 变暗（灰色）样式逐行流式输出
-    /// （类似 Kiro CLI 的展示；转义字符是否生效取决于客户端渲染）；
-    /// 回传的历史里这些文本会被自动剥离，上游看不到。默认 true（文本化展示）。
-    /// 副作用：客户端自己的上下文会包含这些文本，auto-compact 会更早触发。
+    /// thinking 块被改写为 text 块逐行流式输出（类似 Kiro CLI 的展示），样式按客户端入口选择：
+    /// 终端入口（`cli`）用 ANSI 变暗斜体（灰色）；Claude Desktop、`local-agent` 等其他入口不解析
+    /// ANSI，改用无转义的 Markdown 引用块 + 斜体（每行 `> *内容*`）近似变暗。
+    /// 回传的历史里这些文本会被自动剥离，上游看不到；代理上报的 input_tokens 不含它们，output_tokens 默认也不含（见 outputTokensIncludeThinking）。
+    /// 默认 true（文本化展示）。
+    /// 副作用：客户端本地的消息列表仍包含这些文本，其本地估算与自身 compact 的输入会相应变长。
     #[serde(default = "default_true")]
     pub thinking_as_text: bool,
+
+    /// 会话结束时在回复末尾展示 credits 汇总行（仅 Claude Code 客户端）
+    ///
+    /// 开启后，每次对话真正结束（stop_reason=end_turn）时追加一行
+    /// `▸ Credits: turn 0.86 • session 8.73 | Time: 12s`，格式对齐 Kiro CLI：
+    /// turn = 本轮所有上游请求的 credits 之和，session = 同一会话自开启以来的累计，
+    /// Time = 本轮耗时。累计值由代理按上游 meteringEvent 逐请求累加（上游本身不返回累计），
+    /// 进程重启后清零。回传历史时该行会被自动剥离，上游看不到。默认 false。
+    #[serde(default)]
+    pub show_session_credits: bool,
 
     /// 分块写入约束的行数上限（issue #46）
     ///
@@ -190,6 +267,32 @@ pub struct Config {
     /// 0 表示不追加约束。可在 Admin 设置页热修改（仅影响之后的新请求）。
     #[serde(default = "default_write_chunking_max_lines")]
     pub write_chunking_max_lines: u32,
+
+    /// Kiro 请求体落盘取证开关（临时调试用）
+    ///
+    /// true 时每个发往 Kiro 的请求体都会写入 `app/config/kiro-body-dump/`
+    /// （0600 权限，文件名含毫秒时间戳），用于排查协议转换问题。
+    /// 仍兼容环境变量 `KIRO_DUMP_BODY=1`（两者任一满足即生效）。
+    /// 默认 false：不落盘。定位问题后应及时关闭。
+    #[serde(default)]
+    pub dump_kiro_body: bool,
+
+    /// 日志文件路径（可选）
+    ///
+    /// 配置后日志除控制台外同步以 append 模式写入该文件，便于持久化排查。
+    /// 文件打开失败时仅告警降级（只输出控制台），不影响启动。
+    /// 未配置时行为与现状完全一致（仅控制台）。
+    /// 注意：文件持续追加写入，无自动轮转，长期运行请配合外部 logrotate 或定期清理。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_file: Option<String>,
+
+    /// 是否在日志中输出 DEBUG 级别事件（控制台 / 日志文件 / Admin 日志页三处一致）
+    ///
+    /// 默认 false 保持 info 级过滤。可在 Admin 设置页热切换并写回 config.json；
+    /// 开启时在 RUST_LOG 基础上追加全局 debug 指令，target 定向指令仍优先。
+    #[serde(default)]
+    pub debug_logs: bool,
 
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
@@ -216,9 +319,52 @@ fn default_kiro_version() -> String {
     "2.2.2".to_string()
 }
 
-// 0 = 关闭单账号 RPM 硬限（仅依赖上游 429 + throttle_delay 兜底）
 fn default_max_rpm_per_credential() -> u32 {
-    0
+    10
+}
+
+fn default_max_concurrent_requests() -> usize {
+    20
+}
+
+fn default_max_concurrent_per_credential() -> usize {
+    2
+}
+
+fn default_upstream_admission_timeout_secs() -> u64 {
+    30
+}
+
+fn default_account_recovery_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_account_recovery_max_cooldown_secs() -> u64 {
+    3600
+}
+
+fn default_account_recovery_probe_timeout_secs() -> u64 {
+    30
+}
+
+fn default_proxy_health_check_url() -> String {
+    "https://checkip.amazonaws.com/".to_string()
+}
+
+fn default_proxy_health_check_timeout_secs() -> u64 {
+    10
+}
+
+fn default_proxy_health_check_interval_secs() -> u64 {
+    300
+}
+
+fn default_proxy_health_check_concurrency() -> usize {
+    4
+}
+
+fn default_proxy_failure_cooldown_secs() -> u64 {
+    60
 }
 
 fn default_system_version() -> String {
@@ -267,12 +413,31 @@ impl Default for Config {
             admin_psw: None,
             load_balancing_mode: default_load_balancing_mode(),
             max_rpm_per_credential: default_max_rpm_per_credential(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            max_concurrent_per_credential: default_max_concurrent_per_credential(),
+            upstream_admission_timeout_secs: default_upstream_admission_timeout_secs(),
+            account_recovery_cooldown_secs: default_account_recovery_cooldown_secs(),
+            account_recovery_max_cooldown_secs: default_account_recovery_max_cooldown_secs(),
+            account_recovery_probe_timeout_secs: default_account_recovery_probe_timeout_secs(),
+            proxy_health_check_url: default_proxy_health_check_url(),
+            proxy_health_check_timeout_secs: default_proxy_health_check_timeout_secs(),
+            proxy_health_check_interval_secs: default_proxy_health_check_interval_secs(),
+            proxy_health_check_concurrency: default_proxy_health_check_concurrency(),
+            proxy_failure_cooldown_secs: default_proxy_failure_cooldown_secs(),
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
             cache_simulation: CacheSimulationConfig::default(),
             client_token_passthrough: false,
+            prompt_cache_accounting: false,
+            prompt_cache_min_tokens: default_prompt_cache_min_tokens(),
+            models_official_aliases: false,
+            output_tokens_include_thinking: false,
             forward_suggestion_mode: false,
             thinking_as_text: true,
+            show_session_credits: false,
             write_chunking_max_lines: default_write_chunking_max_lines(),
+            dump_kiro_body: false,
+            log_file: None,
+            debug_logs: false,
             config_path: None,
         }
     }
@@ -309,7 +474,85 @@ impl Config {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         config.config_path = Some(path.to_path_buf());
+        config.validate_account_protection()?;
         Ok(config)
+    }
+
+    /// 在启动前拒绝会使保护失效或使计时溢出的配置。
+    pub fn validate_account_protection(&self) -> anyhow::Result<()> {
+        for (name, limit) in [
+            ("maxConcurrentRequests", self.max_concurrent_requests),
+            (
+                "maxConcurrentPerCredential",
+                self.max_concurrent_per_credential,
+            ),
+        ] {
+            anyhow::ensure!(
+                limit > 0 && limit <= tokio::sync::Semaphore::MAX_PERMITS,
+                "{name} must be between 1 and {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
+        for (name, seconds) in [
+            (
+                "upstreamAdmissionTimeoutSecs",
+                self.upstream_admission_timeout_secs,
+            ),
+            (
+                "accountRecoveryCooldownSecs",
+                self.account_recovery_cooldown_secs,
+            ),
+            (
+                "accountRecoveryMaxCooldownSecs",
+                self.account_recovery_max_cooldown_secs,
+            ),
+            (
+                "accountRecoveryProbeTimeoutSecs",
+                self.account_recovery_probe_timeout_secs,
+            ),
+        ] {
+            anyhow::ensure!(
+                seconds > 0 && seconds <= 604_800,
+                "{name} must be between 1 and 604800 seconds"
+            );
+        }
+        anyhow::ensure!(
+            self.account_recovery_max_cooldown_secs >= self.account_recovery_cooldown_secs,
+            "accountRecoveryMaxCooldownSecs must be at least accountRecoveryCooldownSecs"
+        );
+        self.validate_proxy_pool()?;
+        Ok(())
+    }
+
+    fn validate_proxy_pool(&self) -> anyhow::Result<()> {
+        let url = reqwest::Url::parse(&self.proxy_health_check_url)
+            .map_err(|_| anyhow::anyhow!("proxyHealthCheckUrl must be a valid HTTPS URL"))?;
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "proxyHealthCheckUrl must use HTTPS without credentials, query or fragment"
+        );
+        anyhow::ensure!(
+            (1..=4).contains(&self.proxy_health_check_concurrency),
+            "proxyHealthCheckConcurrency must be between 1 and 4"
+        );
+        anyhow::ensure!(
+            (1..=10).contains(&self.proxy_health_check_timeout_secs),
+            "proxyHealthCheckTimeoutSecs must be between 1 and 10"
+        );
+        anyhow::ensure!(
+            (30..=604_800).contains(&self.proxy_health_check_interval_secs),
+            "proxyHealthCheckIntervalSecs must be between 30 and 604800"
+        );
+        anyhow::ensure!(
+            (1..=604_800).contains(&self.proxy_failure_cooldown_secs),
+            "proxyFailureCooldownSecs must be between 1 and 604800"
+        );
+        Ok(())
     }
 
     /// 获取配置文件路径（如果有）
@@ -330,9 +573,20 @@ impl Config {
     /// - `PROXY_USERNAME`: 代理用户名
     /// - `PROXY_PASSWORD`: 代理密码
     /// - `LOAD_BALANCING_MODE`: 负载均衡模式
+    /// - `MAX_RPM_PER_CREDENTIAL`: 单账号每分钟转发尝试上限（0 = 不限）
+    /// - `MAX_CONCURRENT_REQUESTS` / `MAX_CONCURRENT_PER_CREDENTIAL`: 完整响应生命周期的并发上限
+    /// - `UPSTREAM_ADMISSION_TIMEOUT_SECS`: 准入等待上限
+    /// - `ACCOUNT_RECOVERY_COOLDOWN_SECS` / `ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS`: 验活冷却/退避上限
+    /// - `ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS`: 验活超时
+    /// - `PROXY_HEALTH_CHECK_URL`: 无认证的 HTTPS/IP 健康检查目标
+    /// - `PROXY_HEALTH_CHECK_TIMEOUT_SECS`: 容量等待与网络探测各自的超时
+    /// - `PROXY_HEALTH_CHECK_INTERVAL_SECS` / `PROXY_FAILURE_COOLDOWN_SECS`: 正常重检间隔与故障冷却
+    /// - `PROXY_HEALTH_CHECK_CONCURRENCY`: 检测并发上限（最大 4）
     /// - `MODEL_CACHE_TTL_SECS`: /v1/models 动态列表缓存 TTL（秒）
     /// - `CLIENT_TOKEN_PASSTHROUGH`: 客户端 token 直通开关
-    /// - `FORWARD_SUGGESTION_MODE`: Suggestion Mode 输入建议请求放行开关
+    /// - `WRITE_CHUNKING_MAX_LINES`: 分块写入约束行数上限
+    /// - `DUMP_KIRO_BODY`: Kiro 请求体落盘取证开关
+    /// - `LOG_FILE`: 日志文件路径
     pub fn apply_env_overrides(&mut self) {
         if let Ok(v) = env::var("HOST") {
             self.host = v;
@@ -368,6 +622,65 @@ impl Config {
         if let Ok(v) = env::var("LOAD_BALANCING_MODE") {
             self.load_balancing_mode = v;
         }
+        if let Ok(v) = env::var("MAX_RPM_PER_CREDENTIAL")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            self.max_rpm_per_credential = n;
+        }
+        if let Ok(v) = env::var("MAX_CONCURRENT_REQUESTS")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.max_concurrent_requests = n;
+        }
+        if let Ok(v) = env::var("MAX_CONCURRENT_PER_CREDENTIAL")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.max_concurrent_per_credential = n;
+        }
+        for (name, target) in [
+            (
+                "UPSTREAM_ADMISSION_TIMEOUT_SECS",
+                &mut self.upstream_admission_timeout_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_COOLDOWN_SECS",
+                &mut self.account_recovery_cooldown_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS",
+                &mut self.account_recovery_max_cooldown_secs,
+            ),
+            (
+                "ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS",
+                &mut self.account_recovery_probe_timeout_secs,
+            ),
+            (
+                "PROXY_HEALTH_CHECK_TIMEOUT_SECS",
+                &mut self.proxy_health_check_timeout_secs,
+            ),
+            (
+                "PROXY_HEALTH_CHECK_INTERVAL_SECS",
+                &mut self.proxy_health_check_interval_secs,
+            ),
+            (
+                "PROXY_FAILURE_COOLDOWN_SECS",
+                &mut self.proxy_failure_cooldown_secs,
+            ),
+        ] {
+            if let Ok(v) = env::var(name)
+                && let Ok(seconds) = v.parse::<u64>()
+            {
+                *target = seconds;
+            }
+        }
+        if let Ok(url) = env::var("PROXY_HEALTH_CHECK_URL") {
+            self.proxy_health_check_url = url;
+        }
+        if let Ok(value) = env::var("PROXY_HEALTH_CHECK_CONCURRENCY")
+            && let Ok(limit) = value.parse::<usize>()
+        {
+            self.proxy_health_check_concurrency = limit;
+        }
         if let Ok(v) = env::var("MODEL_CACHE_TTL_SECS")
             && let Ok(n) = v.parse::<u64>()
         {
@@ -378,15 +691,55 @@ impl Config {
         {
             self.client_token_passthrough = b;
         }
+        if let Ok(v) = env::var("PROMPT_CACHE_ACCOUNTING")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.prompt_cache_accounting = b;
+        }
+        if let Ok(v) = env::var("PROMPT_CACHE_MIN_TOKENS")
+            && let Ok(n) = v.parse::<i32>()
+        {
+            self.prompt_cache_min_tokens = n;
+        }
+        if let Ok(v) = env::var("MODELS_OFFICIAL_ALIASES")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.models_official_aliases = b;
+        }
+        if let Ok(v) = env::var("OUTPUT_TOKENS_INCLUDE_THINKING")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.output_tokens_include_thinking = b;
+        }
         if let Ok(v) = env::var("FORWARD_SUGGESTION_MODE")
             && let Ok(b) = v.parse::<bool>()
         {
             self.forward_suggestion_mode = b;
         }
+        if let Ok(v) = env::var("DUMP_KIRO_BODY")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.dump_kiro_body = b;
+        }
+        if let Ok(v) = env::var("LOG_FILE")
+            && !v.trim().is_empty()
+        {
+            self.log_file = Some(v);
+        }
+        if let Ok(v) = env::var("DEBUG_LOGS")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.debug_logs = b;
+        }
         if let Ok(v) = env::var("THINKING_AS_TEXT")
             && let Ok(b) = v.parse::<bool>()
         {
             self.thinking_as_text = b;
+        }
+        if let Ok(v) = env::var("SHOW_SESSION_CREDITS")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.show_session_credits = b;
         }
         if let Ok(v) = env::var("WRITE_CHUNKING_MAX_LINES")
             && let Ok(n) = v.parse::<u32>()
@@ -427,6 +780,131 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_health_checks_have_bounded_safe_defaults() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            config.proxy_health_check_url,
+            "https://checkip.amazonaws.com/"
+        );
+        assert_eq!(config.proxy_health_check_timeout_secs, 10);
+        assert_eq!(config.proxy_health_check_interval_secs, 300);
+        assert_eq!(config.proxy_health_check_concurrency, 4);
+        assert_eq!(config.proxy_failure_cooldown_secs, 60);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn proxy_health_checks_reject_unbounded_or_credential_bearing_targets() {
+        for target in [
+            "http://example.invalid/",
+            "https://user:demo@example.invalid/",
+            "https://example.invalid/?token=demo",
+            "https://example.invalid/#fragment",
+            "invalid",
+        ] {
+            let config: Config =
+                serde_json::from_value(serde_json::json!({"proxyHealthCheckUrl":target})).unwrap();
+            assert!(config.validate_account_protection().is_err());
+        }
+        for (field, value) in [
+            ("proxyHealthCheckConcurrency", 0),
+            ("proxyHealthCheckConcurrency", 5),
+            ("proxyHealthCheckTimeoutSecs", 11),
+            ("proxyHealthCheckIntervalSecs", 29),
+            ("proxyFailureCooldownSecs", 0),
+        ] {
+            let config: Config = serde_json::from_value(serde_json::json!({field:value})).unwrap();
+            assert!(config.validate_account_protection().is_err());
+        }
+    }
+
+    #[test]
+    fn account_protection_defaults_apply_to_existing_configs() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_rpm_per_credential, 10);
+        assert_eq!(config.max_concurrent_requests, 20);
+        assert_eq!(config.max_concurrent_per_credential, 2);
+        assert_eq!(config.upstream_admission_timeout_secs, 30);
+        assert_eq!(config.account_recovery_cooldown_secs, 300);
+        assert_eq!(config.account_recovery_max_cooldown_secs, 3600);
+        assert_eq!(config.account_recovery_probe_timeout_secs, 30);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn account_protection_rejects_disabled_concurrency_and_unbounded_timers() {
+        for field in ["maxConcurrentRequests", "maxConcurrentPerCredential"] {
+            let config: Config = serde_json::from_value(serde_json::json!({field: 0})).unwrap();
+            assert!(config.validate_account_protection().is_err(), "{field}");
+        }
+        for field in [
+            "upstreamAdmissionTimeoutSecs",
+            "accountRecoveryCooldownSecs",
+            "accountRecoveryMaxCooldownSecs",
+            "accountRecoveryProbeTimeoutSecs",
+        ] {
+            for invalid in [0, 604_801, u64::MAX] {
+                let config: Config =
+                    serde_json::from_value(serde_json::json!({field: invalid})).unwrap();
+                assert!(
+                    config.validate_account_protection().is_err(),
+                    "{field}={invalid}"
+                );
+            }
+        }
+        let config = Config {
+            account_recovery_cooldown_secs: 600,
+            account_recovery_max_cooldown_secs: 300,
+            ..Config::default()
+        };
+        assert!(config.validate_account_protection().is_err());
+    }
+
+    #[test]
+    fn explicit_unlimited_rpm_is_preserved_without_disabling_concurrency() {
+        let config: Config = serde_json::from_str(r#"{"maxRpmPerCredential":0}"#).unwrap();
+        assert_eq!(config.max_rpm_per_credential, 0);
+        assert_eq!(config.max_concurrent_per_credential, 2);
+        config.validate_account_protection().unwrap();
+    }
+
+    #[test]
+    fn account_protection_environment_overrides_are_validated() {
+        const CHILD: &str = "KIRO_ACCOUNT_PROTECTION_ENV_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let mut config = Config::default();
+            config.apply_env_overrides();
+            assert_eq!(config.max_rpm_per_credential, 6);
+            assert_eq!(config.max_concurrent_requests, 8);
+            assert_eq!(config.max_concurrent_per_credential, 1);
+            assert_eq!(config.upstream_admission_timeout_secs, 12);
+            assert_eq!(config.account_recovery_cooldown_secs, 600);
+            assert_eq!(config.account_recovery_max_cooldown_secs, 1800);
+            assert_eq!(config.account_recovery_probe_timeout_secs, 15);
+            config.validate_account_protection().unwrap();
+            config.max_concurrent_requests = 0;
+            assert!(config.validate_account_protection().is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::config::tests::account_protection_environment_overrides_are_validated",
+            ])
+            .env(CHILD, "1")
+            .env("MAX_RPM_PER_CREDENTIAL", "6")
+            .env("MAX_CONCURRENT_REQUESTS", "8")
+            .env("MAX_CONCURRENT_PER_CREDENTIAL", "1")
+            .env("UPSTREAM_ADMISSION_TIMEOUT_SECS", "12")
+            .env("ACCOUNT_RECOVERY_COOLDOWN_SECS", "600")
+            .env("ACCOUNT_RECOVERY_MAX_COOLDOWN_SECS", "1800")
+            .env("ACCOUNT_RECOVERY_PROBE_TIMEOUT_SECS", "15")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn test_model_cache_ttl_default() {
@@ -479,6 +957,15 @@ mod tests {
     }
 
     #[test]
+    fn test_show_session_credits_defaults_to_false() {
+        assert!(!Config::default().show_session_credits);
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!config.show_session_credits);
+        let config: Config = serde_json::from_str(r#"{"showSessionCredits": true}"#).unwrap();
+        assert!(config.show_session_credits);
+    }
+
+    #[test]
     fn test_client_token_passthrough_deserialize_explicit() {
         let config: Config = serde_json::from_str(r#"{"clientTokenPassthrough": true}"#).unwrap();
         assert!(config.client_token_passthrough);
@@ -495,6 +982,97 @@ mod tests {
     fn test_forward_suggestion_mode_deserialize_explicit() {
         let config: Config = serde_json::from_str(r#"{"forwardSuggestionMode": true}"#).unwrap();
         assert!(config.forward_suggestion_mode);
+    }
+
+    #[test]
+    fn test_dump_kiro_body_default_false() {
+        // 缺省该字段时必须为 false（默认不落盘请求体）
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!config.dump_kiro_body);
+    }
+
+    #[test]
+    fn test_dump_kiro_body_deserialize_explicit() {
+        let config: Config = serde_json::from_str(r#"{"dumpKiroBody": true}"#).unwrap();
+        assert!(config.dump_kiro_body);
+    }
+
+    #[test]
+    fn test_log_file_default_none() {
+        // 缺省该字段时必须为 None（仅控制台输出，行为与现状一致）
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.log_file.is_none());
+    }
+
+    #[test]
+    fn test_log_file_deserialize_explicit() {
+        let config: Config =
+            serde_json::from_str(r#"{"logFile": "app/config/proxy.log"}"#).unwrap();
+        assert_eq!(config.log_file.as_deref(), Some("app/config/proxy.log"));
+    }
+
+    #[test]
+    fn test_debug_logs_default_false() {
+        // 缺省该字段时必须为 false（保持 info 级过滤，行为与现状一致）
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!config.debug_logs);
+        assert!(!Config::default().debug_logs);
+    }
+
+    #[test]
+    fn test_debug_logs_deserialize_explicit() {
+        let config: Config = serde_json::from_str(r#"{"debugLogs": true}"#).unwrap();
+        assert!(config.debug_logs);
+        let config: Config = serde_json::from_str(r#"{"debugLogs": false}"#).unwrap();
+        assert!(!config.debug_logs);
+    }
+
+    #[test]
+    fn test_log_file_env_override() {
+        // 环境变量覆盖 config.json（容器化部署场景），子进程隔离规避 set_var UB
+        const CHILD_MARKER: &str = "KIRO_CONFIG_ENV_TEST_CHILD";
+        if env::var_os(CHILD_MARKER).is_some() {
+            let mut config: Config = serde_json::from_str("{}").unwrap();
+            config.apply_env_overrides();
+            assert_eq!(config.log_file.as_deref(), Some("/tmp/proxy-test.log"));
+            return;
+        }
+
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::config::tests::test_log_file_env_override",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("LOG_FILE", "/tmp/proxy-test.log")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn test_dump_kiro_body_env_override() {
+        // 环境变量覆盖 config.json（容器化部署场景），子进程隔离规避 set_var UB
+        const CHILD_MARKER: &str = "KIRO_CONFIG_ENV_TEST_CHILD";
+        if env::var_os(CHILD_MARKER).is_some() {
+            let mut config: Config = serde_json::from_str("{}").unwrap();
+            config.apply_env_overrides();
+            assert!(config.dump_kiro_body);
+            return;
+        }
+
+        let status = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::config::tests::test_dump_kiro_body_env_override",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("DUMP_KIRO_BODY", "true")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]

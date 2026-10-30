@@ -13,6 +13,17 @@ use tracing_subscriber::layer::Context;
 
 const BROADCAST_CAPACITY: usize = 256;
 
+/// ring buffer 初始预分配条数。容量可达 10 万，按容量预分配会白占约 10MB；
+/// VecDeque 按需倍增，写满后 pop_front / push_back 不再扩容。
+const INITIAL_PREALLOC: usize = 1024;
+
+/// 捕获层单条日志消息的字节上限。容量放大到 10 万条后，个别超大消息（如 DEBUG 下的
+/// 大字段）会显著扩大内存占用。仅截断内存捕获的副本（日志页 / 下载），
+/// 控制台与日志文件不经过此处的截断。
+const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+/// 环形缓存所有留存条目（结构及 String 分配容量）的总预算。
+const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Serialize)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -21,19 +32,62 @@ pub struct LogEntry {
     pub message: String,
 }
 
-pub struct LogCapture {
-    ring_buffer: Arc<Mutex<VecDeque<LogEntry>>>,
-    sender: broadcast::Sender<LogEntry>,
+impl LogEntry {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.timestamp.capacity()
+            + self.level.capacity()
+            + self.target.capacity()
+            + self.message.capacity()
+    }
+}
+
+struct LogBuffer {
+    entries: VecDeque<LogEntry>,
+    retained_bytes: usize,
     capacity: usize,
+    byte_budget: usize,
+}
+
+impl LogBuffer {
+    fn new(capacity: usize, byte_budget: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity.min(INITIAL_PREALLOC)),
+            retained_bytes: 0,
+            capacity,
+            byte_budget,
+        }
+    }
+
+    fn push(&mut self, entry: LogEntry) {
+        let bytes = entry.retained_bytes();
+        // 单条也装不下时保留已有日志；禁止计数为 0 的缓存仍留存一条。
+        if self.capacity == 0 || bytes > self.byte_budget {
+            return;
+        }
+        while self.entries.len() >= self.capacity || self.retained_bytes > self.byte_budget - bytes
+        {
+            let Some(oldest) = self.entries.pop_front() else {
+                break;
+            };
+            self.retained_bytes -= oldest.retained_bytes();
+        }
+        self.retained_bytes += bytes;
+        self.entries.push_back(entry);
+    }
+}
+
+pub struct LogCapture {
+    ring_buffer: Arc<Mutex<LogBuffer>>,
+    sender: broadcast::Sender<LogEntry>,
 }
 
 impl LogCapture {
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
-            ring_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            ring_buffer: Arc::new(Mutex::new(LogBuffer::new(capacity, MAX_BUFFER_BYTES))),
             sender,
-            capacity,
         }
     }
 
@@ -41,13 +95,21 @@ impl LogCapture {
         LogCaptureLayer {
             ring_buffer: self.ring_buffer.clone(),
             sender: self.sender.clone(),
-            capacity: self.capacity,
         }
     }
 
     /// 返回当前 ring buffer 快照（全量复制）
     pub fn snapshot(&self) -> Vec<LogEntry> {
-        self.ring_buffer.lock().iter().cloned().collect()
+        self.ring_buffer.lock().entries.iter().cloned().collect()
+    }
+
+    /// 返回 ring buffer 中最新的至多 `limit` 条（按时间从旧到新）。
+    ///
+    /// 日志页首屏只需要最新一小段；只复制尾部，避免容量很大时每次连接都全量克隆。
+    pub fn snapshot_tail(&self, limit: usize) -> Vec<LogEntry> {
+        let buf = self.ring_buffer.lock();
+        let skip = buf.entries.len().saturating_sub(limit);
+        buf.entries.iter().skip(skip).cloned().collect()
     }
 
     /// 订阅后续新事件（返回 broadcast::Receiver）
@@ -57,9 +119,8 @@ impl LogCapture {
 }
 
 pub struct LogCaptureLayer {
-    ring_buffer: Arc<Mutex<VecDeque<LogEntry>>>,
+    ring_buffer: Arc<Mutex<LogBuffer>>,
     sender: broadcast::Sender<LogEntry>,
-    capacity: usize,
 }
 
 impl<S: Subscriber> Layer<S> for LogCaptureLayer {
@@ -75,6 +136,7 @@ impl<S: Subscriber> Layer<S> for LogCaptureLayer {
 
         let mut message = String::new();
         event.record(&mut MessageVisitor(&mut message));
+        truncate_message(&mut message);
 
         let entry = LogEntry {
             timestamp: chrono::Utc::now()
@@ -85,17 +147,27 @@ impl<S: Subscriber> Layer<S> for LogCaptureLayer {
             message,
         };
 
-        {
-            let mut buf = self.ring_buffer.lock();
-            if buf.len() >= self.capacity {
-                buf.pop_front();
-            }
-            buf.push_back(entry.clone());
-        }
+        self.ring_buffer.lock().push(entry.clone());
 
         // 无接收者时 send 返回 Err，属正常情况，忽略
         let _ = self.sender.send(entry);
     }
+}
+
+/// 超过 `MAX_MESSAGE_BYTES` 的消息截断到最近的字符边界，并附上被截掉的字节数
+fn truncate_message(message: &mut String) {
+    if message.len() <= MAX_MESSAGE_BYTES {
+        return;
+    }
+    let total = message.len();
+    let mut end = MAX_MESSAGE_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message.push_str(&format!("…[已截断 {} 字节]", total - end));
+    // truncate 只改变长度；释放大消息原来的分配，广播通道也不能留住它。
+    message.shrink_to_fit();
 }
 
 struct MessageVisitor<'a>(&'a mut String);
@@ -127,5 +199,149 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
             }
             self.0.push_str(&format!("{}={}", field.name(), s));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(n: usize) -> LogEntry {
+        LogEntry {
+            timestamp: format!("t{n}"),
+            level: "INFO".to_string(),
+            target: "t".to_string(),
+            message: format!("m{n}"),
+        }
+    }
+
+    fn filled(capacity: usize, count: usize) -> LogCapture {
+        let cap = LogCapture::new(capacity);
+        {
+            let mut buf = cap.ring_buffer.lock();
+            for n in 0..count {
+                buf.push(entry(n));
+            }
+        }
+        cap
+    }
+
+    #[test]
+    fn snapshot_tail_returns_latest_in_order() {
+        let cap = filled(100, 10);
+        let tail = cap.snapshot_tail(3);
+        let msgs: Vec<_> = tail.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, ["m7", "m8", "m9"]);
+    }
+
+    #[test]
+    fn truncate_message_keeps_short_and_cuts_long_on_char_boundary() {
+        let mut short = "abc".to_string();
+        truncate_message(&mut short);
+        assert_eq!(short, "abc");
+
+        // 多字节字符横跨上限：不能切在字符中间，也不能 panic
+        let mut long = "日".repeat(MAX_MESSAGE_BYTES);
+        let total = long.len();
+        truncate_message(&mut long);
+        let kept = long.split('…').next().unwrap();
+        assert!(kept.len() <= MAX_MESSAGE_BYTES);
+        assert!(kept.chars().all(|c| c == '日'));
+        assert!(long.ends_with(&format!("…[已截断 {} 字节]", total - kept.len())));
+    }
+
+    #[test]
+    fn new_does_not_preallocate_full_capacity() {
+        let cap = LogCapture::new(100_000);
+        assert!(cap.ring_buffer.lock().entries.capacity() < 100_000);
+    }
+
+    #[test]
+    fn snapshot_tail_limit_larger_than_len_returns_all() {
+        let cap = filled(100, 4);
+        assert_eq!(cap.snapshot_tail(1000).len(), 4);
+        assert_eq!(cap.snapshot_tail(0).len(), 0);
+        assert_eq!(cap.snapshot().len(), 4);
+    }
+
+    #[test]
+    fn byte_budget_evicts_oldest_entries_and_keeps_order() {
+        let entry_bytes = entry(0).retained_bytes();
+        let mut buf = LogBuffer::new(100_000, 3 * entry_bytes);
+        for n in 0..5 {
+            buf.push(entry(n));
+            assert!(buf.retained_bytes <= buf.byte_budget);
+            assert_eq!(
+                buf.retained_bytes,
+                buf.entries
+                    .iter()
+                    .map(LogEntry::retained_bytes)
+                    .sum::<usize>()
+            );
+        }
+        let messages: Vec<_> = buf.entries.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["m2", "m3", "m4"]);
+    }
+
+    #[test]
+    fn byte_budget_counts_all_string_capacities_even_when_content_is_short() {
+        let mut buf = LogBuffer::new(100_000, 1024);
+        buf.push(entry(0));
+        let initial_bytes = buf.retained_bytes;
+        for field in ["timestamp", "level", "target", "message"] {
+            let mut large = entry(1);
+            let value = match field {
+                "timestamp" => &mut large.timestamp,
+                "level" => &mut large.level,
+                "target" => &mut large.target,
+                _ => &mut large.message,
+            };
+            *value = String::with_capacity(2048);
+            value.push('x');
+            assert!(large.retained_bytes() > buf.byte_budget);
+            buf.push(large);
+            assert_eq!(buf.entries.len(), 1);
+            assert_eq!(buf.entries[0].message, "m0");
+            assert_eq!(buf.retained_bytes, initial_bytes);
+        }
+    }
+
+    #[test]
+    fn count_limit_still_applies_with_a_large_byte_budget() {
+        let mut buf = LogBuffer::new(2, MAX_BUFFER_BYTES);
+        for n in 0..4 {
+            buf.push(entry(n));
+        }
+        let messages: Vec<_> = buf.entries.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["m2", "m3"]);
+        assert_eq!(
+            buf.retained_bytes,
+            buf.entries
+                .iter()
+                .map(LogEntry::retained_bytes)
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn truncated_message_releases_original_large_allocation() {
+        let mut message = String::with_capacity(2 * 1024 * 1024);
+        message.push_str(&"x".repeat(MAX_MESSAGE_BYTES + 1));
+        truncate_message(&mut message);
+        assert!(message.contains("[已截断"));
+        assert!(message.capacity() <= MAX_MESSAGE_BYTES + 128);
+    }
+
+    #[test]
+    fn live_broadcast_stays_small_independently_of_history_capacity() {
+        let cap = LogCapture::new(100_000);
+        let mut rx = cap.subscribe();
+        for n in 0..=BROADCAST_CAPACITY {
+            assert!(cap.sender.send(entry(n)).is_ok());
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(n)) if n > 0
+        ));
     }
 }

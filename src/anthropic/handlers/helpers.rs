@@ -64,6 +64,24 @@ pub(crate) fn extract_client_ip(
     connect_info.map(|addr| addr.ip().to_string())
 }
 
+/// 提取客户端 User-Agent（截断至 256 字符）
+///
+/// UA 由客户端可控输入，超长值会撑爆落库 JSON 与明细文件，统一截断；
+/// 常见 UA（claude-cli/codex 等）远短于该上限，截断不影响正常展示。
+/// 非 UTF-8 字节经 lossy 替换（U+FFFD）降级保留可读部分，避免含非 ASCII
+/// 的 UA 被整体丢弃、与"未携带"不可区分；chars 截断最坏 4 字节/char
+/// （256 char ≤ 1024B），落库体积仍可控。
+pub(crate) fn extract_user_agent(headers: &axum::http::HeaderMap) -> Option<String> {
+    const MAX_UA_CHARS: usize = 256;
+    let value = headers.get(axum::http::header::USER_AGENT)?;
+    let ua = String::from_utf8_lossy(value.as_bytes());
+    let ua = ua.trim();
+    if ua.is_empty() {
+        return None;
+    }
+    Some(ua.chars().take(MAX_UA_CHARS).collect())
+}
+
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
 ///
 /// - Opus 4.6/4.7/4.8/5：覆写为 adaptive 类型
@@ -241,6 +259,29 @@ pub(crate) fn is_suggestion_mode_request(payload: &MessagesRequest) -> bool {
         })
 }
 
+/// 估算缓存前缀 tokens 并按 `prefix_cached` 门控 cache_read 口径。
+///
+/// 返回 `(raw_prefix_tokens, prefix_estimated_tokens)`：
+/// - `raw_prefix_tokens`：system + tools + 除最后一条消息外的全部历史（`count_prefix_tokens`
+///   口径），**始终**供 `count_all_tokens_with_prefix` 累加总输入，不受门控影响
+/// - `prefix_estimated_tokens`：仅当会话前缀已命中冻结缓存（`ConversionResult::prefix_cached`，
+///   详见其文档）时等于 `raw_prefix_tokens`，否则为 0 —— 新窗口首条消息、单条消息重发、
+///   history[0] 首次出现/漂移重置的轮次不计入 cache_read
+///
+/// `/v1/messages` 与 `/cc/v1/messages` 共用，保证两端点口径一致。
+pub(crate) fn estimate_prefix_tokens(payload: &MessagesRequest, prefix_cached: bool) -> (u64, i32) {
+    let n = payload.messages.len();
+    let prior: &[_] = if n > 0 {
+        &payload.messages[..n - 1]
+    } else {
+        &[]
+    };
+    let raw =
+        token::count_prefix_tokens(payload.system.as_deref(), prior, payload.tools.as_deref());
+    let gated = if prefix_cached { raw as i32 } else { 0 };
+    (raw, gated)
+}
+
 /// 为建议请求构造空响应（按 stream 分流）。
 ///
 /// 流式：返回完整 SSE 事件序列（message_start + 空 text 块 + end_turn 收尾）。
@@ -248,7 +289,10 @@ pub(crate) fn is_suggestion_mode_request(payload: &MessagesRequest) -> bool {
 ///
 /// Claude Code 对该响应只取候选文本，空文本等价于"无建议"；返回结构完整的
 /// 正常响应而非错误，避免客户端把建议失败当主对话故障重试。
-pub(crate) fn suggestion_mode_response(stream: bool) -> axum::response::Response {
+///
+/// `model` 回显请求模型、usage 全部为 0：下游计费网关（如 sub2api）按响应的
+/// model / usage 记账，回显假模型名会被标记"模型不一致"，非零 output 会被计费。
+pub(crate) fn suggestion_mode_response(stream: bool, model: &str) -> axum::response::Response {
     if !stream {
         return axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
@@ -259,12 +303,12 @@ pub(crate) fn suggestion_mode_response(stream: bool) -> axum::response::Response
                     "type": "message",
                     "role": "assistant",
                     "content": [{ "type": "text", "text": "" }],
-                    "model": "suggestion",
+                    "model": model,
                     "stop_reason": "end_turn",
                     "stop_sequence": null,
                     "usage": {
                         "input_tokens": 0,
-                        "output_tokens": 1,
+                        "output_tokens": 0,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0
                     }
@@ -289,12 +333,12 @@ pub(crate) fn suggestion_mode_response(stream: bool) -> axum::response::Response
                     "type": "message",
                     "role": "assistant",
                     "content": [],
-                    "model": "suggestion",
+                    "model": model,
                     "stop_reason": null,
                     "stop_sequence": null,
                     "usage": {
                         "input_tokens": 0,
-                        "output_tokens": 1,
+                        "output_tokens": 0,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0
                     }
@@ -318,7 +362,7 @@ pub(crate) fn suggestion_mode_response(stream: bool) -> axum::response::Response
             serde_json::json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": "end_turn", "stop_sequence": null },
-                "usage": { "input_tokens": 0, "output_tokens": 1 }
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
             }),
         ),
         SseEvent::new(
@@ -345,6 +389,29 @@ pub(crate) fn suggestion_mode_response(stream: bool) -> axum::response::Response
 mod tests {
     use super::*;
     use serde_json::json;
+
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn suggestion_response_echoes_model_with_zero_usage() {
+        let v: serde_json::Value = serde_json::from_str(
+            &body_string(suggestion_mode_response(false, "claude-opus-5-5")).await,
+        )
+        .unwrap();
+        assert_eq!(v["model"], "claude-opus-5-5");
+        assert_eq!(v["usage"]["output_tokens"], 0);
+        assert_eq!(v["usage"]["input_tokens"], 0);
+
+        let sse = body_string(suggestion_mode_response(true, "claude-opus-5-5")).await;
+        assert!(sse.contains("\"model\":\"claude-opus-5-5\""));
+        assert!(!sse.contains("\"suggestion\""));
+        assert!(!sse.contains("\"output_tokens\":1"));
+    }
 
     fn request_with_last_message(role: &str, content: serde_json::Value) -> MessagesRequest {
         serde_json::from_value(json!({
@@ -464,5 +531,71 @@ mod tests {
             None
         );
         assert_eq!(resolve_recorded_effort(false, None), None);
+    }
+
+    fn headers_with_ua(ua: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_str(ua).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn extract_user_agent_normal_value_passthrough() {
+        let headers = headers_with_ua("claude-cli/2.1.5 (external, cli)");
+        assert_eq!(
+            extract_user_agent(&headers).as_deref(),
+            Some("claude-cli/2.1.5 (external, cli)")
+        );
+    }
+
+    #[test]
+    fn extract_user_agent_missing_or_blank_is_none() {
+        // 头缺失 → None
+        assert_eq!(extract_user_agent(&axum::http::HeaderMap::new()), None);
+        // 仅空白字符（trim 后为空）→ None
+        assert_eq!(extract_user_agent(&headers_with_ua("   ")), None);
+    }
+
+    #[test]
+    fn extract_user_agent_truncated_at_256_chars() {
+        let long = "a".repeat(300);
+        let result = extract_user_agent(&headers_with_ua(&long)).unwrap();
+        assert_eq!(result.len(), 256);
+    }
+
+    #[test]
+    fn extract_user_agent_surrounding_whitespace_trimmed() {
+        let headers = headers_with_ua("  claude-cli/2.1.5  ");
+        assert_eq!(
+            extract_user_agent(&headers).as_deref(),
+            Some("claude-cli/2.1.5")
+        );
+    }
+
+    #[test]
+    fn extract_user_agent_non_ascii_lossy_preserved() {
+        // 含非法 UTF-8 字节的 UA：降级保留可读部分（非法字节 → U+FFFD），
+        // 不应整体返回 None 与"未携带"混淆
+        let value =
+            axum::http::HeaderValue::from_bytes(b"claude-cli/2.1.5 (\xFF\xFE, cli)").unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::USER_AGENT, value);
+        let result = extract_user_agent(&headers).unwrap();
+        assert!(result.starts_with("claude-cli/2.1.5 ("));
+        assert!(result.contains('\u{FFFD}'));
+        assert!(result.ends_with(", cli)"));
+    }
+
+    #[test]
+    fn extract_user_agent_valid_utf8_multibyte_preserved() {
+        // 合法多字节 UTF-8 UA（如中文标注）应原样保留而非被丢弃
+        let headers = headers_with_ua("MyClient/1.0 (中文客户端)");
+        assert_eq!(
+            extract_user_agent(&headers).as_deref(),
+            Some("MyClient/1.0 (中文客户端)")
+        );
     }
 }

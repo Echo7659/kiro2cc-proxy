@@ -4,6 +4,7 @@
 
 mod calib;
 mod context;
+mod credits_footer;
 mod echo_guard;
 mod helpers;
 mod state;
@@ -15,21 +16,28 @@ pub use calib::cap_input_tokens_pub;
 #[cfg(test)]
 pub(crate) use calib::scale_for_client_with;
 pub(crate) use calib::{CLIENT_ASSUMED_CONTEXT_WINDOW, scale_for_client};
-pub use calib::{client_token_passthrough_enabled, set_client_token_passthrough};
+pub use calib::{
+    client_token_passthrough_enabled, output_tokens_include_thinking, set_client_token_passthrough,
+    set_output_tokens_include_thinking,
+};
 pub use context::StreamContext;
+pub(crate) use credits_footer::strip_credits_footer;
+pub use credits_footer::{
+    CreditsFooterRequest, begin_request, credits_footer_request, record_credits, render_footer,
+    set_show_session_credits, show_session_credits_enabled,
+};
 pub(crate) use echo_guard::ResponseEchoGuard;
 pub(crate) use helpers::generate_fake_signature;
 pub use state::SseEvent;
 pub(crate) use thinking::split_thinking_and_visible;
 pub use thinking_text::{
-    ThinkingTextRewriter, is_claude_code_client, set_thinking_as_text, thinking_as_text_enabled,
+    ThinkingTextRewriter, ThinkingTextStyle, set_thinking_as_text, thinking_as_text_enabled,
+    thinking_text_style,
 };
 pub(crate) use thinking_text::{strip_dim_markers, strip_rendered_thinking};
 
 #[cfg(test)]
 pub(crate) use calib::context_window_for_model;
-#[cfg(test)]
-pub(crate) use helpers::{count_token_chars, tokens_from_chars};
 #[cfg(test)]
 pub(crate) use state::SseStateManager;
 #[cfg(test)]

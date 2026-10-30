@@ -140,9 +140,9 @@ pub(crate) fn parse_bridge_query(input_json: &str) -> String {
 /// - `consumed == false`：事件按现有路径透传（含 Collecting 期间的
 ///   AssistantResponse 说明文字与非目标工具调用）
 ///
-/// 计费口径（对齐 `process_tool_use`）：截获的 input 分片同样无条件计入
-/// `output_chars_other`——上游已生成这段内容即已计费；可见性块把 query 回传给了
-/// 客户端，故 `visible_chars_other` 同步累加。
+/// 计费口径（对齐 `process_tool_use`）：截获的 input 分片同样无条件追加进
+/// `output_full_text`——上游已生成这段内容即已计费；可见性块把 query 回传给了
+/// 客户端，故 `visible_full_text` 同步追加。
 pub(crate) fn bridge_handle_event(
     ctx: &mut StreamContext,
     bridge: &mut Option<BridgeState>,
@@ -163,9 +163,8 @@ pub(crate) fn bridge_handle_event(
                 input_buffer.push_str(&tu.input);
                 if tu.stop {
                     // 截获完成：解析 query → 发可见性块 → 记录待执行搜索 → 回 PassThrough
-                    let chars = input_buffer.len() as i64;
-                    ctx.output_chars_other += chars;
-                    ctx.visible_chars_other += chars;
+                    ctx.output_full_text.push_str(input_buffer);
+                    ctx.visible_full_text.push_str(input_buffer);
 
                     let query = parse_bridge_query(input_buffer);
                     let events = build_web_search_visibility_events(ctx, tool_use_id, &query);
@@ -197,9 +196,8 @@ pub(crate) fn bridge_handle_event(
                 };
                 // 首个分片即带 stop=true（单事件完整调用）→ 立即完成截获
                 if tu.stop {
-                    let chars = tu.input.len() as i64;
-                    ctx.output_chars_other += chars;
-                    ctx.visible_chars_other += chars;
+                    ctx.output_full_text.push_str(&tu.input);
+                    ctx.visible_full_text.push_str(&tu.input);
 
                     let query = parse_bridge_query(&tu.input);
                     let events = build_web_search_visibility_events(ctx, &id, &query);
@@ -270,7 +268,9 @@ fn build_web_search_visibility_events(
         events.push(stop);
     }
 
-    events
+    // 桥接事件直接发给消费者，不经过 process_kiro_event 的统一出口。
+    // 原生思考的 raw stop 也必须在搜索边界完成文本化收尾。
+    ctx.render_outbound(events)
 }
 
 /// 构造 `web_search_tool_result` 可见性块（D4，携带真实 MCP 搜索结果）
@@ -305,7 +305,7 @@ pub(crate) fn build_web_search_result_events(
         events.push(stop);
     }
 
-    events
+    ctx.render_outbound(events)
 }
 
 /// 构建续请求体（D3：手工构建，绕过 validate_tool_pairing）
@@ -367,7 +367,7 @@ pub(crate) fn build_search_tool_result(
 #[allow(clippy::large_enum_variant)] // 变体大小差异是桥接语义所需（Failed 不携带流）
 pub(crate) enum BridgeRoundOutcome {
     Continued(
-        reqwest::Response,
+        crate::kiro::provider::UpstreamResponse,
         EventStreamDecoder,
         Option<websearch::WebSearchResults>,
     ),
@@ -382,10 +382,36 @@ pub(crate) enum BridgeRoundOutcome {
 /// ping/deadline 分支照常就绪触发——桥接轮执行期间下游心跳不再中断，
 /// 且耗尽的 body_stream 借条件前置不再被 poll（避免 flatten 重入误收尾）。
 pub(crate) type InFlightRound = (
-    tokio::task::JoinHandle<(BridgeState, BridgeRoundOutcome)>,
+    AbortOnDropTask<(BridgeState, BridgeRoundOutcome)>,
     // 本轮对应的 web_search tool_use_id（轮次完成后构建配对结果块用）
     String,
 );
+
+/// A dropped downstream SSE must cancel its background MCP/continuation task as well.
+/// Dropping a bare JoinHandle detaches it and would keep upstream capacity occupied.
+pub(crate) struct AbortOnDropTask<T>(pub(crate) tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDropTask<T> {
+    pub(crate) fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDropTask<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// 执行一轮桥接：MCP 真实搜索 → 构建续请求 → 发起续流（D3/D4/D8）
 ///
@@ -490,7 +516,7 @@ pub(crate) async fn bridge_execute_round_owned(
 /// error 事件收尾（finished = true）；后台任务 panic 兜底复用 `Failed(None)`。
 pub(crate) struct BridgeRoundHarvest {
     pub(crate) events: Vec<SseEvent>,
-    pub(crate) new_body_stream: reqwest::Response,
+    pub(crate) new_body_stream: crate::kiro::provider::UpstreamResponse,
     pub(crate) new_decoder: EventStreamDecoder,
     pub(crate) finished: bool,
 }
@@ -502,6 +528,7 @@ pub(crate) fn harvest_bridge_round(
 ) -> BridgeRoundHarvest {
     match outcome {
         BridgeRoundOutcome::Continued(response, new_decoder, search_results) => {
+            ctx.mark_continuation();
             let events = build_web_search_result_events(ctx, result_tool_use_id, &search_results);
             // 续流的首个事件前先补发本轮配对结果块，保持块序：
             // server_tool_use → web_search_tool_result → 续流内容
@@ -520,7 +547,8 @@ pub(crate) fn harvest_bridge_round(
             // 原值不再被消费（decoder 原样带回占位）
             BridgeRoundHarvest {
                 events,
-                new_body_stream: reqwest::Response::from(http::Response::new(body_dummy_bytes())),
+                new_body_stream: reqwest::Response::from(http::Response::new(body_dummy_bytes()))
+                    .into(),
                 new_decoder: EventStreamDecoder::new(),
                 finished: true,
             }

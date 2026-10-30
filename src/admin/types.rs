@@ -39,6 +39,15 @@ pub struct CredentialStatusItem {
     pub auth_method: Option<String>,
     /// 是否有 Profile ARN
     pub has_profile_arn: bool,
+    /// OIDC Client ID（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Profile ARN（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    /// 账号级 Machine ID（非机密；编辑弹窗只读展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     /// refreshToken 的 SHA-256 哈希（用于前端重复检测）
     pub refresh_token_hash: Option<String>,
     /// 用户邮箱（用于前端显示）
@@ -62,6 +71,13 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_pool_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_route_status: Option<String>,
+    pub proxy_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_proxy_url: Option<String>,
     /// 账号级 thinking adaptive 注入开关（前端按钮显示当前状态）
     pub thinking_adaptive: bool,
     /// 健康状态
@@ -71,6 +87,11 @@ pub struct CredentialStatusItem {
     /// 禁用原因（None = 未禁用；QuotaExceeded 时前端显示「额度已用尽」而非通用「已禁用」）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<crate::kiro::token_manager::DisabledReason>,
+    /// 自动禁用后的下一次只读验活时间，手动禁用不安排验活。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_recovery_probe_at: Option<String>,
+    pub recovery_probe_in_flight: bool,
+    pub recovery_failures: u32,
 }
 
 // ============ 操作请求 ============
@@ -139,7 +160,7 @@ pub struct AddCredentialRequest {
     pub api_region: Option<String>,
 
     /// 账号级 Machine ID（可选，64 位字符串）
-    /// 未配置时回退到 config.json 的 machineId
+    /// 未配置时生成并持久化账号自己的标识；不共用全局 machineId。
     pub machine_id: Option<String>,
 
     /// 用户邮箱（可选，用于前端显示）
@@ -164,7 +185,8 @@ fn default_auth_method() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddCredentialRequest, CredentialStatusItem};
+    use super::{AddCredentialRequest, CredentialStatusItem, DumpFilesResponse};
+    use crate::common::dump::DumpFileMeta;
 
     /// 构造仅填充必填字段的状态项，其余用默认值
     fn sample_status_item() -> CredentialStatusItem {
@@ -177,6 +199,9 @@ mod tests {
             expires_at: None,
             auth_method: Some("social".to_string()),
             has_profile_arn: true,
+            client_id: None,
+            profile_arn: None,
+            machine_id: None,
             refresh_token_hash: None,
             email: None,
             nickname: None,
@@ -187,11 +212,46 @@ mod tests {
             last_used_at: None,
             has_proxy: false,
             proxy_url: None,
+            proxy_pool_id: None,
+            proxy_route_status: None,
+            proxy_mode: "global".to_string(),
+            effective_proxy_url: None,
             thinking_adaptive: true,
             health_status: crate::kiro::token_manager::HealthStatus::Healthy,
             throttle_count: 0,
             disabled_reason: None,
+            next_recovery_probe_at: None,
+            recovery_probe_in_flight: false,
+            recovery_failures: 0,
         }
+    }
+
+    /// Dump 列表响应的字段名与嵌套结构（前端按 camelCase 读取，嵌套项亦然）
+    #[test]
+    fn dump_files_response_serializes_camel_case() {
+        let resp = DumpFilesResponse {
+            files: vec![DumpFileMeta {
+                name: "body-1700000000000.json".to_string(),
+                size_bytes: 1024,
+                created_at_ms: 1700000000000,
+            }],
+            total_bytes: 1024,
+            max_files: 200,
+            max_archive_bytes: 128 * 1024 * 1024,
+        };
+
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["totalBytes"], 1024);
+        assert_eq!(json["maxFiles"], 200);
+        assert_eq!(json["maxArchiveBytes"], 128 * 1024 * 1024);
+        // 嵌套的 DumpFileMeta 同样为 camelCase
+        assert_eq!(json["files"][0]["name"], "body-1700000000000.json");
+        assert_eq!(json["files"][0]["sizeBytes"], 1024);
+        assert_eq!(json["files"][0]["createdAtMs"], 1700000000000i64);
+        // 不应出现 snake_case 泄漏
+        assert!(json["files"][0].get("size_bytes").is_none());
+        assert!(json.get("total_bytes").is_none());
     }
 
     /// 登录来源与区域配置需随状态列表下发，前端弹窗据此展示
@@ -209,6 +269,26 @@ mod tests {
         assert_eq!(json["apiRegion"], "us-west-2");
     }
 
+    /// Client ID / Profile ARN / Machine ID（均非机密）需随状态列表下发，
+    /// 编辑弹窗「有值即锁定」只读展示依赖这三个字段
+    #[test]
+    fn credential_status_item_serializes_idc_fields_for_edit_lock() {
+        let mut item = sample_status_item();
+        item.client_id = Some("client-id".to_string());
+        item.profile_arn = Some("arn:aws:codewhisperer:us-east-1:123:profile/abc".to_string());
+        item.machine_id = Some("0a1b2c3d".repeat(8));
+
+        let json = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(json["clientId"], "client-id");
+        assert!(
+            json["profileArn"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("arn:aws:"))
+        );
+        assert_eq!(json["machineId"], "0a1b2c3d".repeat(8));
+    }
+
     /// 未配置时省略字段而非输出 null，保持与结构体既有可选字段一致的下发形状
     #[test]
     fn credential_status_item_omits_empty_provider_and_regions() {
@@ -217,6 +297,9 @@ mod tests {
         assert!(json.get("provider").is_none());
         assert!(json.get("authRegion").is_none());
         assert!(json.get("apiRegion").is_none());
+        assert!(json.get("clientId").is_none());
+        assert!(json.get("profileArn").is_none());
+        assert!(json.get("machineId").is_none());
     }
 
     #[test]
@@ -388,6 +471,71 @@ pub struct SetThinkingAsTextRequest {
     pub enabled: bool,
 }
 
+/// 会话 credits 汇总行开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowSessionCreditsResponse {
+    /// 是否在对话结束时于回复末尾展示 turn / session credits
+    pub enabled: bool,
+}
+
+/// 设置会话 credits 汇总行开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetShowSessionCreditsRequest {
+    /// 是否在对话结束时于回复末尾展示 turn / session credits
+    pub enabled: bool,
+}
+
+/// Kiro 请求体落盘取证开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpKiroBodyResponse {
+    /// 是否把发往 Kiro 的请求体落盘到 app/config/kiro-body-dump/
+    pub enabled: bool,
+}
+
+/// 设置 Kiro 请求体落盘取证开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDumpKiroBodyRequest {
+    /// 是否把发往 Kiro 的请求体落盘到 app/config/kiro-body-dump/
+    pub enabled: bool,
+}
+
+/// Dump 文件列表响应
+///
+/// 领域类型复用 `common::dump::DumpFileMeta`（已带 camelCase serde 属性），
+/// 本类型只做 HTTP 响应包裹，不重复定义同义结构。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DumpFilesResponse {
+    /// 目录内符合命名规则的 dump 文件，按文件名（即时间）排序
+    pub files: Vec<crate::common::dump::DumpFileMeta>,
+    /// 上述文件累计字节数
+    pub total_bytes: u64,
+    /// 滚动清理保留的文件数上限（取自 `common::dump::MAX_DUMP_FILES`）
+    pub max_files: usize,
+    /// 归档总量上限，供前端判断是否提示截断（取自 `common::dump::MAX_ARCHIVE_BYTES`）
+    pub max_archive_bytes: u64,
+}
+
+/// DEBUG 日志开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugLogsResponse {
+    /// 是否输出 DEBUG 级别日志（控制台 / 日志文件 / Admin 日志页三处一致）
+    pub enabled: bool,
+}
+
+/// 设置 DEBUG 日志开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDebugLogsRequest {
+    /// 是否输出 DEBUG 级别日志
+    pub enabled: bool,
+}
+
 /// 运行时配置（maxRpm / port / proxyUrl / writeChunkingMaxLines）查询响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -396,7 +544,7 @@ pub struct RuntimeConfigResponse {
     pub max_rpm_per_credential: u32,
     /// 监听端口（config.json 持久化值，重启后生效）
     pub port: u16,
-    /// 上游代理地址（config.json 持久化值，重启后生效；空表示未配置）
+    /// 上游代理安全地址（不含认证或查询参数；空表示未配置）
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（运行时当前值，0 = 不追加约束，热生效）
     pub write_chunking_max_lines: u32,
@@ -410,7 +558,7 @@ pub struct SetRuntimeConfigRequest {
     pub max_rpm_per_credential: Option<u32>,
     /// 监听端口（1–65535，重启后生效）
     pub port: Option<u16>,
-    /// 上游代理地址（空串/None = 清除；支持 http/https/socks5，重启后生效）
+    /// 上游代理地址（空串清除，None 保持；与安全显示地址相同则保留原认证）
     pub proxy_url: Option<String>,
     /// 分块写入约束的行数上限（0 = 不追加约束，热生效，仅影响之后的新请求）
     pub write_chunking_max_lines: Option<u32>,
@@ -592,6 +740,8 @@ pub struct AdminModelItem {
     pub rate_multiplier: Option<f64>,
     /// 模型发布日期（`YYYY-MM-DD`）；未登记为 None，前端据此实时计算「最近新增」标记
     pub released_at: Option<String>,
+    /// 官方模型描述；上游未返回或回退静态表时为 None
+    pub description: Option<String>,
 }
 
 /// 支持模型列表响应

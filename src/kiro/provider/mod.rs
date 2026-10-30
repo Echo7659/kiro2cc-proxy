@@ -8,6 +8,7 @@
 //! 按功能拆分：core（结构与基础方法）、headers（请求头构建）、api（公开 API 入口与
 //! MCP 调用）、retry（重试与故障转移）、errors（错误分类与请求体改写）、tests（测试）。
 
+mod admission;
 mod api;
 mod core;
 mod errors;
@@ -15,6 +16,9 @@ mod headers;
 mod retry;
 
 #[cfg(test)]
+mod admission_tests;
+#[cfg(test)]
 mod tests;
 
+pub use admission::{AccountUnavailableError, RateLimitError, StaleContextError, UpstreamResponse};
 pub use core::KiroProvider;

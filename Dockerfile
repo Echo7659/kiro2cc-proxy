@@ -17,13 +17,13 @@ FROM rust:1-alpine AS builder
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY assets ./assets
 COPY --from=frontend-builder /app/web-ui/admin-ui/dist /app/web-ui/admin-ui/dist
 COPY --from=frontend-builder /app/web-ui/user-ui/dist /app/web-ui/user-ui/dist
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM alpine:3.21
 

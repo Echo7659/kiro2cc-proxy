@@ -173,7 +173,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_sticky_hit_resets_throttle_counter() {
+    async fn test_sticky_token_hit_preserves_throttles_until_request_completes() {
         let config = Config::default();
         let manager = MultiTokenManager::new(
             config,
@@ -190,11 +190,20 @@ pub(crate) mod tests {
             .unwrap();
 
         assert!(!manager.report_sticky_throttled("session-reset", ctx.id));
-        // 一次成功命中即清零，避免跨越较长时间的零散限流累积成解绑
+        // 拿到 Token 不代表上游请求成功，不能提前清零限流次数。
         manager
             .acquire_context_sticky(None, &[], Some("session-reset"), &[])
             .await
             .unwrap();
+        assert_eq!(
+            manager
+                .sticky_cache
+                .lock()
+                .get("session-reset")
+                .map(|e| e.consecutive_throttles),
+            Some(1)
+        );
+        manager.report_success(ctx.id);
         assert_eq!(
             manager
                 .sticky_cache

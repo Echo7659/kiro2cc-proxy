@@ -91,8 +91,7 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_region: Option<String>,
 
-    /// 账号级 Machine ID 配置（可选）
-    /// 未配置时回退到 config.json 的 machineId；都未配置时由 refreshToken 派生
+    /// 固定的账号级 Machine ID；导入或初始化时生成并持久化，不继承共享的全局标识。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
 
@@ -123,6 +122,13 @@ pub struct KiroCredentials {
     /// 账号级代理认证密码（可选）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_password: Option<String>,
+
+    /// 管理代理池的稳定绑定；手动代理/direct 不设置该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_pool_id: Option<u64>,
+    /// 当前代理配置版本，仅用于阻止排队请求使用旧出口，不写入凭据文件。
+    #[serde(skip)]
+    pub proxy_pool_generation: Option<u64>,
 
     /// 账号是否被禁用（默认为 false）
     #[serde(default)]
@@ -184,8 +190,14 @@ impl std::fmt::Debug for KiroCredentials {
             .field("email", &masked_email)
             .field("nickname", &self.nickname)
             .field("subscription_title", &self.subscription_title)
-            .field("proxy_url", &self.proxy_url)
-            .field("proxy_username", &self.proxy_username)
+            .field(
+                "proxy_url",
+                &self
+                    .proxy_url
+                    .as_deref()
+                    .map(crate::http_client::safe_proxy_address),
+            )
+            .field("proxy_username", &redact(&self.proxy_username))
             .field("proxy_password", &redact(&self.proxy_password))
             .field("disabled", &self.disabled)
             .field("thinking_adaptive", &self.thinking_adaptive)

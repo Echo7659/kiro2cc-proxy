@@ -1,6 +1,5 @@
 # Rust build artifacts
 target/
-Cargo.lock
 
 # Node.js dependencies and build artifacts
 admin-ui/node_modules/
@@ -8,6 +7,10 @@ admin-ui/dist/
 admin-ui/pnpm-lock.yaml
 admin-ui/tsconfig.tsbuildinfo
 admin-ui/.vite/
+web-ui/*/node_modules/
+web-ui/*/dist/
+web-ui/*/tsconfig.tsbuildinfo
+web-ui/*/.vite/
 
 # Version control
 .git/
@@ -47,6 +50,10 @@ Thumbs.db
 # Local configuration (keep templates only)
 config.json
 credentials.json
+proxies.json
+proxies.json.tmp-*
+data/
+app/config/
 
 # Docker files
 Dockerfile

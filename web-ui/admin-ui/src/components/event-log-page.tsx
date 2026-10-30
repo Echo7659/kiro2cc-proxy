@@ -37,8 +37,8 @@ interface EventLogRecord {
 
 /** 色调白名单：动态拼接类名会被 Tailwind purge，故用静态 Record */
 const TONE = {
-  warn: { value: 'text-warn', tag: 'text-warn bg-warn-soft border-warn-line' },
-  danger: { value: 'text-danger', tag: 'text-danger bg-danger-soft border-danger-line' },
+  warn: { value: 'text-warn', tag: 'text-warn bg-warn-soft border-transparent' },
+  danger: { value: 'text-danger', tag: 'text-danger bg-danger-soft border-transparent' },
 } as const
 
 /** 标签（设计稿 .tag） */
@@ -106,7 +106,7 @@ export function EventLogPage({
   }
 
   return (
-    <div>
+    <div className="flex h-[calc(100vh-56px)] min-h-[480px] flex-col">
       {/* 页头（设计稿 .head）：三级面包屑 + 返回钮 + 序号副标题 + 日志类型标签与刷新 */}
       <PageHead
         crumb={[t('dashboard.navMain'), t('dashboard.navCredentials'), title]}
@@ -147,10 +147,10 @@ export function EventLogPage({
       </MetricsBar>
 
       {/* 事件表（.panel + .tscroll + .panel-foot） */}
-      <div className="mt-[15px]">
+      <div className="mt-[15px] flex min-h-0 flex-1 flex-col">
         <h3 className={PANEL_TITLE}>{t(titleKey)}</h3>
-        <section className={PANEL}>
-          <div className="max-h-[70vh] overflow-y-auto">
+        <section className={`${PANEL} flex min-h-0 flex-1 flex-col`}>
+          <div className="relative min-h-0 flex-1 overflow-y-auto">
             <table className="w-full border-separate border-spacing-0">
               <thead>
                 <tr>
@@ -182,7 +182,7 @@ export function EventLogPage({
                         {formatDateTime(record.createdAt)}
                       </td>
                       <td className={CELL}>
-                        <span className={`${TAG} border-hairline-2 bg-surface-3 text-ink-2`}>
+                        <span className={`${TAG} border-transparent bg-surface-3 text-ink-2`}>
                           {record.requestType.toUpperCase()}
                         </span>
                       </td>
@@ -232,7 +232,7 @@ export function EventLogPage({
           <DialogHeader>
             <DialogTitle>{t('logs.fullResponseTitle')}</DialogTitle>
           </DialogHeader>
-          <pre className="flex-1 overflow-y-auto whitespace-pre-wrap break-all rounded-[8px] border border-hairline bg-surface-2 p-3 font-mono text-[11.5px] leading-[1.55] text-ink-2">
+          <pre className="flex-1 overflow-y-auto whitespace-pre-wrap break-all rounded-[8px] border border-transparent bg-surface-2 p-3 font-mono text-[11.5px] leading-[1.55] text-ink-2">
             {selectedBody}
           </pre>
         </DialogContent>

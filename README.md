@@ -10,11 +10,11 @@
 
 ![Admin 管理面板](docs/assets/admin-panel.png)
 
-> **✅ 支持模型**：Claude Sonnet 5.5 · Claude Sonnet 5 · Claude Sonnet 4.5 · Claude Sonnet 4.6 · Claude Opus 5.5 · Claude Opus 5 · Claude Opus 4.5 · Claude Opus 4.6 · Claude Opus 4.7 · Claude Opus 4.8 · Claude Haiku 5.5 · Claude Haiku 4.5 · DeepSeek 3.2 · GLM-5 · MiniMax M2.1 · MiniMax M2.5 · Qwen3-Coder · GPT-5.6 Sol · GPT-5.6 Terra · GPT-5.6 Luna
+> **✅ 支持模型**：Claude Sonnet 5.5 · Claude Sonnet 5 · Claude Sonnet 4.5 · Claude Sonnet 4.6 · Claude Opus 5.5 · Claude Opus 5 · Claude Opus 4.5 · Claude Opus 4.6 · Claude Opus 4.7 · Claude Opus 4.8 · Claude Haiku 5.5 · Claude Haiku 4.5 · DeepSeek 3.2 · GLM-5 · MiniMax M2.1 · MiniMax M2.5 · Qwen3-Coder · Kimi K3 · GPT-5.6 Sol · GPT-5.6 Terra · GPT-5.6 Luna
 
 ### 📖 快速导航
 
-[🚀 快速开始](#-快速开始新手必读) ・ [🍎 macOS 部署](#-本地部署macos) ・ [🪟 Windows 部署](#-本地部署windows) ・ [🐧 Linux 部署](#-服务器部署linux) ・ [🔑 获取账号](#-获取-kiro-账号) ・ [⚙️ 配置详解](#-配置详解) ・ [🤖 接入 Claude Code](#-接入-claude-code) ・ [🧬 接入 Codex CLI](#-接入-codex-cli--openai-sdk) ・ [🔌 API 端点](#-api-端点) ・ [🗺️ 模型映射](#-模型映射) ・ [🛡️ Admin 面板](#-admin-管理面板) ・ [❓ 常见问题](#-常见问题) ・ [⚠️ 注意事项](#-注意事项)
+[🚀 快速开始](#-快速开始新手必读) ・ [🍎 macOS 部署](#-本地部署macos) ・ [🪟 Windows 部署](#-本地部署windows) ・ [🐧 Linux 部署](#-服务器部署linux) ・ [🔑 获取账号](#-获取-kiro-账号) ・ [⚙️ 配置详解](#️-配置详解) ・ [🤖 接入 Claude Code](#-接入-claude-code) ・ [🧬 接入 Codex CLI](#-接入-codex-cli--openai-sdk) ・ [🔌 API 端点](#-api-端点) ・ [🗺️ 模型映射](#️-模型映射) ・ [🛡️ Admin 面板](#️-admin-管理面板) ・ [❓ 常见问题](#-常见问题) ・ [⚠️ 注意事项](#️-注意事项)
 
 ---
 
@@ -40,6 +40,7 @@
 | **🛠️ 工具调用** | 完整支持 function calling / tool use |
 | **🛡️ Admin 管理** | 可选的 Web 管理界面，支持账号管理、余额查询等 |
 | **🌐 账号级代理** | 支持为每个账号单独配置 HTTP/SOCKS5 代理 |
+| **🌐 代理池** | 批量导入代理，账号优先独占、数量不足时共享，确认故障后自动切换 |
 
 ---
 
@@ -93,7 +94,7 @@ cd kiro2cc-proxy
 
 ### （可选）安装 Shell 快捷命令
 
-运行项目自带的一键安装脚本，以后可在任意终端直接使用 `build_kiro2cc_proxy` 和 `run_kiro2cc_proxy` 命令，无需切换到项目目录：
+运行项目自带的一键安装脚本，以后可在任意终端直接使用 `build_kiro2cc_proxy`、`build_and_run_kiro2cc_proxy` 和 `run_kiro2cc_proxy` 命令，无需切换到项目目录：
 
 ```bash
 bash setup_shell_aliases.sh
@@ -103,8 +104,9 @@ source ~/.zshrc   # zsh 用户；bash 用户执行 source ~/.bashrc
 安装后即可使用：
 
 ```bash
-build_kiro2cc_proxy   # 等同于 ./build-mac.sh
-run_kiro2cc_proxy     # 等同于 ./run-local-service-mac.sh
+build_kiro2cc_proxy         # 等同于 ./build-mac.sh
+build_and_run_kiro2cc_proxy # 等同于 ./build-and-run-mac.sh（先构建后启动）
+run_kiro2cc_proxy           # 等同于 ./run-local-service-mac.sh
 ```
 
 > 脚本仅适用于 macOS，自动修改 `~/.zshrc` 和 `~/.bashrc`（如存在），可重复运行（幂等）。
@@ -199,7 +201,7 @@ cd kiro2cc-proxy
 
 ### （可选）安装 PowerShell 快捷命令
 
-运行项目自带的安装脚本，以后可在任意 PowerShell 直接使用 `build_kiro2cc_proxy` 和 `run_kiro2cc_proxy` 命令，无需切换到项目目录：
+运行项目自带的安装脚本，以后可在任意 PowerShell 直接使用 `build_kiro2cc_proxy`、`build_and_run_kiro2cc_proxy` 和 `run_kiro2cc_proxy` 命令，无需切换到项目目录：
 
 ```powershell
 .\setup_shell_aliases.ps1
@@ -209,8 +211,9 @@ cd kiro2cc-proxy
 安装后即可使用：
 
 ```powershell
-build_kiro2cc_proxy   # 等同于 .\build-windows.ps1
-run_kiro2cc_proxy     # 等同于 .\run-local-service-windows.ps1
+build_kiro2cc_proxy         # 等同于 .\build-windows.ps1
+build_and_run_kiro2cc_proxy # 等同于 .\build-and-run-windows.ps1（先构建后启动）
+run_kiro2cc_proxy           # 等同于 .\run-local-service-windows.ps1
 ```
 
 > 脚本同时更新 Windows PowerShell 5.x 和 PowerShell 7+ 的 profile，可重复运行（幂等）。
@@ -389,7 +392,7 @@ bash start_server.sh restart   # 重启
 
 **第一步：从 Kiro Account Manager 导出账号 JSON**
 
-1. 安装 Kiro IDE 或 Kiro Account Manager
+1. 安装 Kiro IDE 或 [Kiro Account Manager（KAM）](https://github.com/chaogei/Kiro-account-manager/releases)，下载地址：[KAM Releases 页面](https://github.com/chaogei/Kiro-account-manager/releases)
 2. 使用 GitHub / Google 等 Social 账号登录
 3. 在账号管理界面找到"导出账号信息"或"Export Account"选项
 4. 导出为 JSON 文件（或复制 JSON 内容）
@@ -469,7 +472,7 @@ bash start_server.sh restart   # 重启
 
 ### 多端点负载均衡（v2.8.7+）
 
-Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazonq`）走独立的限流桶。本代理在单账号内自动轮询这些端点：429 时只封禁命中桶（30s 后自动恢复），不影响其它端点、不切换账号。
+Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazonq`）各自记录限流状态。本代理可以轮询这些端点，但收到 429 后也会按 `Retry-After` 冷却整个账号，避免换端点继续请求同一账号；没有有效响应头时默认等待 30 秒。
 
 默认启用全部 4 端点。账号可通过 `endpoint` 字段声明首选端点（首选在首 + 剩余端点按默认序去重追加）：
 
@@ -501,13 +504,30 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `proxyUrl` | 否 | — | HTTP/SOCKS5 代理，如 `http://127.0.0.1:7890` |
 | `proxyUsername` | 否 | — | 代理用户名 |
 | `proxyPassword` | 否 | — | 代理密码 |
+| `proxyHealthCheckUrl` | 否 | `https://checkip.amazonaws.com/` | 代理 HTTPS/IP 健康检查目标；不携带账号凭据 |
+| `proxyHealthCheckTimeoutSecs` | 否 | `10` | 容量等待与实际网络检测分别使用此超时，范围 1–10 秒；排队超时不判定故障 |
+| `proxyHealthCheckIntervalSecs` | 否 | `300` | 健康代理重新检测间隔，范围 30–604800 秒 |
+| `proxyHealthCheckConcurrency` | 否 | `4` | 代理检测并发，范围 1–4；自动每轮最多 25 条 |
+| `proxyFailureCooldownSecs` | 否 | `60` | 故障代理冷却后重新检测的等待秒数 |
 | `tlsBackend` | 否 | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
 | `loadBalancingMode` | 否 | `priority` | `priority`（按优先级）或 `balanced`（轮询） |
-| `maxRpmPerCredential` | 否 | `0` | 单个账号每分钟最大请求数；`0` 表示不限。设置页保存后立即热生效并写入 `config.json` |
+| `maxRpmPerCredential` | 否 | `10` | 单个账号每分钟实际转发尝试上限，包括失败与重试；`0` 显式关闭 RPM 保护。设置页保存后立即热生效 |
+| `maxConcurrentRequests` | 否 | `20` | 全局上游并发上限，覆盖完整响应体和 SSE；修改后重启 |
+| `maxConcurrentPerCredential` | 否 | `2` | 单账号上游并发上限，覆盖完整响应体和 SSE；修改后重启 |
+| `upstreamAdmissionTimeoutSecs` | 否 | `30` | 最长准入等待时间，超时返回 429 与 Retry-After |
+| `accountRecoveryCooldownSecs` | 否 | `300` | 自动禁用后的首次只读验活等待秒数 |
+| `accountRecoveryMaxCooldownSecs` | 否 | `3600` | 验活失败后指数退避的最大等待秒数 |
+| `accountRecoveryProbeTimeoutSecs` | 否 | `30` | 单次账号验活总超时秒数 |
 | `forwardSuggestionMode` | 否 | `false` | Suggestion Mode 输入建议请求放行开关。`false`（默认）时服务端拦截 Claude Code 每轮对话后自动发起的全量上下文预测请求并返回空响应，不产生 Token 消耗；`true` 时正常转发上游，以展示输入建议，但每轮会额外产生一次全量上下文计费请求。可用环境变量 `FORWARD_SUGGESTION_MODE` 覆盖 |
 | `clientTokenPassthrough` | 否 | `false` | 客户端 token 直通：`true` 时返回给客户端的 `usage` 字段 1:1 上报真实值；`false`（默认）时按 `0.6657` 系数缩放展示。适用于按返回用量统计上下文占用的第三方客户端；无论开关状态如何，Claude Code 的 auto-compact 触发时机保持不变。可用环境变量 `CLIENT_TOKEN_PASSTHROUGH` 覆盖 |
+| `promptCacheAccounting` | 否 | `false` | 按 Anthropic `cache_control` 断点规则模拟缓存记账：`true` 时 `cache_read` / `cache_creation`（含 5m/1h 拆分）按请求中的断点、20 block 回看窗口与 TTL 计算，取代"除最后一条消息外全部计为缓存读、写入恒为 0"的前缀估算；不带 `cache_control` 的请求全部计为普通输入（OpenAI 兼容端点按自动前缀缓存计算）。缓存按 API Key 隔离（类似官方的 workspace 级隔离），模型按映射后的 Kiro 模型 ID 区分；缓存表落盘到配置目录 `prompt_cache.json`，重启后恢复。**这是本地模拟：只让下游账单的拆分口径贴近官方，不反映 Kiro 侧真实缓存命中与真实成本（真实成本以 credits 为准）。**适用于下游按 usage 计费的网关。可用环境变量 `PROMPT_CACHE_ACCOUNTING` 覆盖 |
+| `promptCacheMinTokens` | 否 | `0` | 断点记账最小可缓存长度的全局覆盖（token）。`0`（默认）按模型取 Anthropic 官方值：Opus 5.5 / Opus 5 / Sonnet 5.5 / Haiku 5.5 等为 512，Opus 4.7 为 2048，Opus 4.6 / Opus 4.5 / Haiku 4.5 为 4096，其余为 1024；`> 0` 时对所有模型统一使用该值。可用环境变量 `PROMPT_CACHE_MIN_TOKENS` 覆盖 |
+| `modelsOfficialAliases` | 否 | `false` | `true` 时 `/v1/models` 为上游点号模型 ID 追加官方连字符别名（如 `claude-opus-4.6` → `claude-opus-4-6`，4.5 代际再追加带日期的 ID），供按模型列表生成映射的下游网关使用；默认关闭，避免 Claude Code 模型选择器出现重复项。可用环境变量 `MODELS_OFFICIAL_ALIASES` 覆盖 |
+| `outputTokensIncludeThinking` | 否 | `false` | `true` 时返回给客户端的 `output_tokens` 包含 thinking（与 Anthropic 官方口径一致）；`false`（默认）只计可见输出。可用环境变量 `OUTPUT_TOKENS_INCLUDE_THINKING` 覆盖 |
 | `writeChunkingMaxLines` | 否 | `300` | 分块写入约束的行数上限（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
-| `thinkingAsText` | 否 | `false` | 思考内容文本化（仅 Claude Code 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本、以 ANSI 变暗（灰色）样式逐行流式展示（类似 Kiro CLI），解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。两种模式下客户端（Claude Code）上下文都包含思考内容，但回传上游时都会整块丢弃：关闭时丢弃原生 thinking 块，开启时丢弃「💭 Thinking」标记行、思考正文与时长行，上游上下文不含思考内容（仅当流被中断、缺少时长行时，保守降级为只剥标记行）。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
+| `thinkingAsText` | 否 | `true` | 思考内容文本化（Claude Code / Claude Desktop 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本、逐行流式展示（类似 Kiro CLI；终端入口 `cli` 用 ANSI 变暗斜体样式，Claude Desktop、`local-agent` 等其他入口改用无转义的 Markdown 引用块 + 斜体来近似变暗，避免出现 `[2m` / `[0m` 乱码），解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。两种模式下客户端（Claude Code）上下文都包含思考内容，但回传上游时都会整块丢弃：关闭时丢弃原生 thinking 块，开启时丢弃「💭 Thinking」标记行、思考正文与时长行，上游上下文不含思考内容（仅当流被中断、缺少时长行时，保守降级为只剥标记行）。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
+| `showSessionCredits` | 否 | `false` | 会话 credits 汇总行（仅 Claude Code 客户端）：`true` 时，每次对话真正结束（`end_turn`，工具调用中间步骤不显示）会在回复末尾追加一行 `▸ Credits: turn 0.86 • session 8.73 \| Time: 12s`，格式对齐 Kiro CLI。`turn` 为本轮（一次提问下所有请求，含工具往返）的 credits 之和，`session` 为当前会话自开启以来的累计，`Time` 为本轮耗时。上游 `meteringEvent` 只返回单次请求的用量、不带累计值，所以累计由代理逐请求累加，重启服务后清零。终端入口 `cli` 为变暗灰色，其他入口为无转义的 Markdown 斜体。该行回传上游前自动剥离，不进入上游上下文、不计入 `output_tokens`；不带工具定义的辅助请求（标题生成、压缩等）不追加；暂不支持非流式请求。可用环境变量 `SHOW_SESSION_CREDITS` 覆盖 |
+| `debugLogs` | 否 | `false` | DEBUG 日志开关：`true` 时控制台、日志文件（`logFile`）与 Admin「查看日志」页三处同步输出 DEBUG 级别事件，可在 Admin 设置页热切换（无需重启）并写回 config.json；关闭后停止捕获新的 DEBUG，已捕获的记录保留。注意该开关返回/保存的是开关状态而非实际生效档位：设置 `RUST_LOG` 环境变量时，其指令仍优先（开关仅在 `RUST_LOG` 基础上追加全局 `debug` 指令，target 定向指令不受影响）。日志量会显著增加，排障后建议关闭。可用环境变量 `DEBUG_LOGS` 覆盖 |
 
 > **TLS 说明**：如遇到 Token 刷新失败或请求报错，尝试将 `tlsBackend` 改为 `native-tls`。
 
@@ -522,14 +542,17 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
   "proxyUrl": "http://127.0.0.1:7890",
   "tlsBackend": "rustls",
   "loadBalancingMode": "priority",
-  "maxRpmPerCredential": 0,
+  "maxRpmPerCredential": 10,
   "forwardSuggestionMode": false,
   "clientTokenPassthrough": false,
-  "thinkingAsText": false
+  "thinkingAsText": true,
+  "debugLogs": false
 }
 ```
 
 ### 设置页的运行时配置
+
+账号保护的默认值、固定设备标识、完整流并发，以及冷却后验活恢复的行为详见[账号保护机制](docs/account-protection.md)。验活不发送模型推理请求；手动禁用和永久失效账号不自动恢复。
 
 配置 `adminPsw` 后，可在 Admin 设置页直接管理以下选项；每次保存都会写回 `config.json`。
 
@@ -538,6 +561,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | Suggestion Mode 输入建议 | `forwardSuggestionMode` | 立即热生效 |
 | 客户端 token 直通 | `clientTokenPassthrough` | 立即热生效 |
 | 思考内容文本化展示 | `thinkingAsText` | 立即热生效，仅影响之后的新请求 |
+| 会话 Credits 汇总行 | `showSessionCredits` | 立即热生效，仅影响之后的新请求 |
+| DEBUG 日志 | `debugLogs` | 立即热生效，控制台 / 日志文件 / 日志页三处一致 |
 | 每账号 RPM 上限 | `maxRpmPerCredential` | 立即热生效，`0` 表示不限 |
 | 分块写入行数上限 | `writeChunkingMaxLines` | 立即热生效，仅影响之后的新请求，`0` 表示不追加约束 |
 | 监听端口 | `port` | 重启服务后生效，范围为 `1–65535` |
@@ -546,6 +571,8 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 > **客户端鉴权说明**：`config.json` 不再提供全局 API Key。客户端调用 `/v1/messages`、`/cc/v1/messages` 时，需使用 Admin 后台（`adminPsw` 登录）创建并启用的子 API Key 进行鉴权。注：若未配置 `adminPsw`，Admin 面板本身将被禁用，无法创建子 API Key，需先完成配置。
 
 ### 账号级代理
+
+Admin 的「代理列表」支持批量导入 `host:port:username:password`，自动为没有显式代理的新账号分配健康代理，优先独占、不足时共享。账号绑定保持稳定，确认连接故障后才切换；配置过的代理池没有健康节点时暂停请求，不会静默直连。持久化、检测和导入格式详见[代理池说明](docs/proxy-pool.md)。
 
 可以为每个账号单独配置代理，优先级高于全局代理：
 
@@ -782,6 +809,7 @@ Authorization: Bearer your-api-key
 | `*minimax*`（含 2.5/2-5） | `minimax-m2.5` |
 | `*minimax*`（其他） | `minimax-m2.1` |
 | `*qwen*` | `qwen3-coder-next` |
+| `*kimi*` | `kimi-k3` |
 | `*gpt*`（含 terra） | `gpt-5.6-terra` |
 | `*gpt*`（含 luna） | `gpt-5.6-luna` |
 | `*gpt*`（含 sol，或含 5.6/5-6 但无具体变体名，默认落到旗舰档） | `gpt-5.6-sol` |
@@ -800,6 +828,7 @@ Authorization: Bearer your-api-key
 - 调整账号优先级
 - 查看各账号余额
 - 重置账号失败状态
+- 「使用文档」页面：客户端配置生成（Claude Code / Codex CLI / OpenAI SDK / CC Switch 一键导入）、接口参考与排障指南（选中 API Key 后自动填充示例）
 
 **Admin API**（需要 `x-api-key` 或 `Authorization: Bearer` 认证）：
 
@@ -893,8 +922,7 @@ docker compose down && docker compose up -d
 
 ```bash
 git pull
-./build-mac.sh
-./run-local-service-mac.sh
+./build-and-run-mac.sh   # 或分开执行：./build-mac.sh && ./run-local-service-mac.sh
 ```
 
 ---
@@ -922,6 +950,8 @@ kiro2cc-proxy/
 ├── Dockerfile              # Docker 镜像构建
 ├── build-mac.sh            # 一键构建脚本（macOS）
 ├── build-windows.ps1       # 一键构建脚本（Windows）
+├── build-and-run-mac.sh            # 一键构建并启动脚本（macOS）
+├── build-and-run-windows.ps1       # 一键构建并启动脚本（Windows）
 ├── run-local-service-mac.sh         # macOS 本地启动脚本
 ├── run-local-service-windows.ps1   # Windows 本地启动脚本
 ├── setup_shell_aliases.sh  # macOS Shell 快捷命令安装脚本
@@ -940,16 +970,24 @@ MIT
 
 本项目基于 [kiro.rs](https://github.com/hank9999/kiro.rs) 二次开发，感谢原作者的开源贡献。
 
-感谢所有为本项目做出贡献的开发者：
+感谢所有为本项目做出贡献的开发者（排名不分先后）：
 
-- [kosuke-zhang](https://github.com/kosuke-zhang)
-- [lqzhgood](https://github.com/lqzhgood)
+- [jayus71](https://github.com/jayus71) — [#53](https://github.com/TsinHzl/kiro2cc-proxy/pull/53)
+- [fhy12130-afk](https://github.com/fhy12130-afk) — [#50](https://github.com/TsinHzl/kiro2cc-proxy/pull/50)
+- [kosuke-zhang](https://github.com/kosuke-zhang) — [#28](https://github.com/TsinHzl/kiro2cc-proxy/pull/28)
+- [lqzhgood](https://github.com/lqzhgood) — [#37](https://github.com/TsinHzl/kiro2cc-proxy/pull/37), [#35](https://github.com/TsinHzl/kiro2cc-proxy/pull/35), [#33](https://github.com/TsinHzl/kiro2cc-proxy/pull/33)
 - [xhsngdsan](https://github.com/xhsngdsan)
+- [zbjincheng](https://github.com/zbjincheng) — [#41](https://github.com/TsinHzl/kiro2cc-proxy/pull/41)
 
-**特别致谢**——以下 Issue 直接推动了关键修复：
+**致谢**——以下 Issue 直接推动了关键修复：
 
-- [AX10MER](https://github.com/AX10MER) — [#47](https://github.com/TsinHzl/kiro2cc-proxy/issues/47) 定位 `history[0]` 冻结缓存 key 漂移导致 Kiro 前缀缓存逐轮失效
-- [C2Y-cyber](https://github.com/C2Y-cyber) — [#46](https://github.com/TsinHzl/kiro2cc-proxy/issues/46) 定位长生成轮约 247s 被上游 Reset，促成大参数工具调用分块写入约束
-- [XiaoZhuiWang](https://github.com/XiaoZhuiWang) — [#40](https://github.com/TsinHzl/kiro2cc-proxy/issues/40) 反馈 sonnet 5 反代响应慢，促成 effort 兜底值下调
+- [NoahNyy](https://github.com/NoahNyy) — [#58](https://github.com/TsinHzl/kiro2cc-proxy/issues/58), [#57](https://github.com/TsinHzl/kiro2cc-proxy/issues/57)
+- [jayus71](https://github.com/jayus71) — [#56](https://github.com/TsinHzl/kiro2cc-proxy/issues/56), [#52](https://github.com/TsinHzl/kiro2cc-proxy/issues/52)
+- [aidenli](https://github.com/aidenli) — [#54](https://github.com/TsinHzl/kiro2cc-proxy/issues/54)
+- [AX10MER](https://github.com/AX10MER) — [#47](https://github.com/TsinHzl/kiro2cc-proxy/issues/47)
+- [C2Y-cyber](https://github.com/C2Y-cyber) — [#46](https://github.com/TsinHzl/kiro2cc-proxy/issues/46)
+- [XiaoZhuiWang](https://github.com/XiaoZhuiWang) — [#40](https://github.com/TsinHzl/kiro2cc-proxy/issues/40)
+- [SunNorthGod](https://github.com/SunNorthGod) — [#9](https://github.com/TsinHzl/kiro2cc-proxy/issues/9), [#8](https://github.com/TsinHzl/kiro2cc-proxy/issues/8)
+- [RecordingTheSmile](https://github.com/RecordingTheSmile) — [#44](https://github.com/TsinHzl/kiro2cc-proxy/issues/44)
 
 > 感谢每一位提交 Issue、反馈建议和参与讨论的用户，是你们让这个项目不断完善。

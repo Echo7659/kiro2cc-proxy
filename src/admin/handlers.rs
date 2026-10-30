@@ -329,10 +329,153 @@ fn persist_thinking_as_text(config_path: &std::path::Path, enabled: bool) -> any
     })
 }
 
+/// GET /api/admin/config/show-session-credits
+/// 获取会话 credits 汇总行开关
+pub async fn get_show_session_credits() -> impl IntoResponse {
+    Json(super::types::ShowSessionCreditsResponse {
+        enabled: crate::anthropic::show_session_credits_enabled(),
+    })
+}
+
+/// PUT /api/admin/config/show-session-credits
+/// 设置会话 credits 汇总行开关（运行时热切换并持久化到 config.json；仅影响之后的新请求）
+pub async fn set_show_session_credits(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::types::SetShowSessionCreditsRequest>,
+) -> impl IntoResponse {
+    // 热更新在锁内执行，保证内存与磁盘写入顺序一致（见 set_suggestion_mode 注释）
+    let _guard = state.persist_lock.lock();
+    crate::anthropic::set_show_session_credits(payload.enabled);
+    if let Some(ref config_path) = state.config_path
+        && let Err(e) = persist_show_session_credits(config_path, payload.enabled)
+    {
+        tracing::error!("持久化会话 credits 汇总行开关失败: {}", e);
+        let error = super::types::AdminErrorResponse::internal_error("持久化失败，但运行时已生效");
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(error)),
+        )
+            .into_response();
+    }
+
+    Json(SuccessResponse::new(if payload.enabled {
+        "会话 credits 汇总行已开启"
+    } else {
+        "会话 credits 汇总行已关闭"
+    }))
+    .into_response()
+}
+
+/// 将会话 credits 汇总行开关写回 config.json
+fn persist_show_session_credits(
+    config_path: &std::path::Path,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    persist_config_field(config_path, |json| {
+        json["showSessionCredits"] = serde_json::Value::Bool(enabled);
+    })
+}
+
+/// GET /api/admin/config/dump-kiro-body
+/// 获取 Kiro 请求体落盘取证开关
+pub async fn get_dump_kiro_body() -> impl IntoResponse {
+    Json(super::types::DumpKiroBodyResponse {
+        enabled: crate::anthropic::kiro_body_dump_enabled(),
+    })
+}
+
+/// PUT /api/admin/config/dump-kiro-body
+/// 设置 Kiro 请求体落盘取证开关（运行时热切换并持久化到 config.json；仅影响之后的新请求）
+pub async fn set_dump_kiro_body(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::types::SetDumpKiroBodyRequest>,
+) -> impl IntoResponse {
+    // 热更新在锁内执行，保证内存与磁盘写入顺序一致（见 set_suggestion_mode 注释）
+    let _guard = state.persist_lock.lock();
+    crate::anthropic::set_kiro_body_dump_enabled(payload.enabled);
+    if payload.enabled {
+        // 与 main.rs 启动时开启的告警保持一致：落盘含完整请求内容（可能含敏感信息），定位后应关闭
+        tracing::warn!(
+            "已开启 Kiro 请求体落盘取证（热切换）：请求体将写入 app/config/kiro-body-dump/，包含完整对话内容与凭据信息，定位问题后请及时关闭"
+        );
+    }
+    if let Some(ref config_path) = state.config_path
+        && let Err(e) = persist_dump_kiro_body(config_path, payload.enabled)
+    {
+        tracing::error!("持久化 Kiro 请求体落盘开关失败: {}", e);
+        // 显式区分运行时生效与持久化结果，避免客户端仅凭 500 误判开关未生效
+        let error = serde_json::json!({
+            "success": false,
+            "message": "持久化失败，但运行时已生效",
+            "runtimeEnabled": payload.enabled,
+            "persisted": false,
+        });
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+    }
+
+    Json(SuccessResponse::new(if payload.enabled {
+        "Kiro 请求体落盘已开启"
+    } else {
+        "Kiro 请求体落盘已关闭"
+    }))
+    .into_response()
+}
+
+/// 将 Kiro 请求体落盘取证开关写回 config.json
+fn persist_dump_kiro_body(config_path: &std::path::Path, enabled: bool) -> anyhow::Result<()> {
+    persist_config_field(config_path, |json| {
+        json["dumpKiroBody"] = serde_json::Value::Bool(enabled);
+    })
+}
+
 /// 将 Suggestion Mode 开关写回 config.json
 fn persist_suggestion_mode(config_path: &std::path::Path, enabled: bool) -> anyhow::Result<()> {
     persist_config_field(config_path, |json| {
         json["forwardSuggestionMode"] = serde_json::Value::Bool(enabled);
+    })
+}
+
+/// GET /api/admin/config/debug-logs
+/// 获取 DEBUG 日志开关
+pub async fn get_debug_logs() -> impl IntoResponse {
+    Json(super::types::DebugLogsResponse {
+        enabled: crate::logging::debug_logs_enabled(),
+    })
+}
+
+/// PUT /api/admin/config/debug-logs
+/// 设置 DEBUG 日志开关（全局过滤器热切换并持久化到 config.json）
+pub async fn set_debug_logs(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::types::SetDebugLogsRequest>,
+) -> impl IntoResponse {
+    // 热更新在锁内执行，保证内存与磁盘写入顺序一致（见 set_suggestion_mode 注释）
+    let _guard = state.persist_lock.lock();
+    if let Err(msg) = crate::logging::set_debug_enabled(payload.enabled) {
+        tracing::error!("热切换 DEBUG 日志开关失败: {}", msg);
+        let error = super::types::AdminErrorResponse::internal_error(&msg);
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+    }
+    if let Some(ref config_path) = state.config_path
+        && let Err(e) = persist_debug_logs(config_path, payload.enabled)
+    {
+        tracing::error!("持久化 DEBUG 日志开关失败: {}", e);
+        let error = super::types::AdminErrorResponse::internal_error("持久化失败，但运行时已生效");
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+    }
+
+    Json(SuccessResponse::new(if payload.enabled {
+        "DEBUG 日志已开启（热生效，控制台 / 日志文件 / 日志页一致）"
+    } else {
+        "DEBUG 日志已关闭（热生效，已捕获的 DEBUG 记录保留）"
+    }))
+    .into_response()
+}
+
+/// 将 DEBUG 日志开关写回 config.json
+fn persist_debug_logs(config_path: &std::path::Path, enabled: bool) -> anyhow::Result<()> {
+    persist_config_field(config_path, |json| {
+        json["debugLogs"] = serde_json::Value::Bool(enabled);
     })
 }
 
@@ -349,7 +492,9 @@ pub async fn get_runtime_config(State(state): State<AdminState>) -> impl IntoRes
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
     {
         port = json["port"].as_u64().unwrap_or(8080) as u16;
-        proxy_url = json["proxyUrl"].as_str().map(str::to_string);
+        proxy_url = json["proxyUrl"]
+            .as_str()
+            .map(crate::http_client::safe_proxy_address);
     }
     if port == 0 {
         port = 8080;
@@ -375,6 +520,16 @@ fn validate_proxy_url(url: &str) -> Result<(), String> {
         return Err("proxyUrl 必须使用 http/https/socks5 协议且包含主机名".to_string());
     }
     Ok(())
+}
+
+/// 设置页读到的是安全地址；未改动地址时保留私有认证，避免保存时丢失密码。
+fn proxy_url_for_update(current: Option<&str>, requested: &str) -> String {
+    match current {
+        Some(stored) if requested == crate::http_client::safe_proxy_address(stored) => {
+            stored.to_string()
+        }
+        _ => requested.to_string(),
+    }
 }
 
 /// PUT /api/admin/config/runtime
@@ -424,7 +579,8 @@ pub async fn set_runtime_config(
                         map.remove("proxyUrl");
                     }
                 } else {
-                    json["proxyUrl"] = serde_json::Value::String(url.clone());
+                    let stored = proxy_url_for_update(json["proxyUrl"].as_str(), url);
+                    json["proxyUrl"] = serde_json::Value::String(stored);
                 }
             }
         });
@@ -595,6 +751,48 @@ mod tests {
     }
 
     #[test]
+    fn test_persist_dump_kiro_body_roundtrip() {
+        let dir = temp_config_dir("dkb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"host":"127.0.0.1"}"#).unwrap();
+
+        persist_dump_kiro_body(&path, true).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["dumpKiroBody"], serde_json::Value::Bool(true));
+        assert_eq!(json["host"], "127.0.0.1");
+
+        persist_dump_kiro_body(&path, false).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["dumpKiroBody"], serde_json::Value::Bool(false));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_persist_show_session_credits_roundtrip() {
+        let dir = temp_config_dir("ssc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"host":"127.0.0.1"}"#).unwrap();
+
+        persist_show_session_credits(&path, true).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["showSessionCredits"], serde_json::Value::Bool(true));
+        assert_eq!(json["host"], "127.0.0.1");
+
+        persist_show_session_credits(&path, false).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["showSessionCredits"], serde_json::Value::Bool(false));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_persist_thinking_as_text_roundtrip() {
         let dir = temp_config_dir("tat");
         std::fs::create_dir_all(&dir).unwrap();
@@ -611,6 +809,27 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["thinkingAsText"], serde_json::Value::Bool(false));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_persist_debug_logs_roundtrip() {
+        let dir = temp_config_dir("dbg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"host":"127.0.0.1"}"#).unwrap();
+
+        persist_debug_logs(&path, true).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["debugLogs"], serde_json::Value::Bool(true));
+        assert_eq!(json["host"], "127.0.0.1");
+
+        persist_debug_logs(&path, false).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["debugLogs"], serde_json::Value::Bool(false));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -720,6 +939,76 @@ mod tests {
         let proxy_url = json["proxyUrl"].as_str().map(str::to_string);
         assert_eq!(port, 8080);
         assert_eq!(proxy_url, None);
+    }
+
+    #[tokio::test]
+    async fn runtime_proxy_settings_redact_and_preserve_authentication() {
+        use crate::admin::service::AdminService;
+        use crate::kiro::token_manager::MultiTokenManager;
+        use crate::model::config::Config;
+        use std::sync::Arc;
+
+        let directory = temp_config_dir("runtime-proxy-auth");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        let private_url =
+            "http://demo-user:demo-password~value@gateway.example:10001/private?token=synthetic";
+        std::fs::write(
+            &path,
+            serde_json::json!({"proxyUrl": private_url}).to_string(),
+        )
+        .unwrap();
+        let manager = MultiTokenManager::new(Config::default(), vec![], None, None, false).unwrap();
+        let state = AdminState::new(
+            Arc::new(parking_lot::RwLock::new("synthetic-admin".to_string())),
+            AdminService::new(Arc::new(manager)),
+        )
+        .with_config_path(path.clone());
+
+        let response = get_runtime_config(State(state.clone()))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let public: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(public["proxyUrl"], "http://gateway.example:10001");
+        for secret in ["demo-user", "demo-password", "synthetic"] {
+            assert!(!String::from_utf8_lossy(&body).contains(secret));
+        }
+        for requested in [
+            "http://gateway.example:10001",
+            "http://other-user:other-password@other.example:10002",
+            "",
+        ] {
+            let response = set_runtime_config(
+                State(state.clone()),
+                Json(super::super::types::SetRuntimeConfigRequest {
+                    max_rpm_per_credential: None,
+                    port: None,
+                    proxy_url: Some(requested.to_string()),
+                    write_chunking_max_lines: None,
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let stored: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if requested.is_empty() {
+                assert!(stored.get("proxyUrl").is_none());
+            } else {
+                assert_eq!(
+                    stored["proxyUrl"],
+                    if requested == "http://gateway.example:10001" {
+                        private_url
+                    } else {
+                        requested
+                    }
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
 

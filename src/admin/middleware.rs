@@ -20,6 +20,7 @@ use crate::log_capture::LogCapture;
 use crate::model::api_key::ApiKeyManager;
 use crate::model::failure_log::FailureLogStore;
 use crate::model::geo::GeoResolver;
+use crate::model::proxy_pool::ProxyPool;
 use crate::model::rpm::RpmTracker;
 use crate::model::throttle_log::ThrottleLogStore;
 use crate::model::usage::UsageTracker;
@@ -52,6 +53,7 @@ pub struct AdminState {
     /// config.json 持久化互斥锁：所有 persist_* 写回共享同一把锁，
     /// 防止并发 PUT（如同时改密钥与开关）的读改写互相覆盖导致字段丢失
     pub persist_lock: Arc<parking_lot::Mutex<()>>,
+    pub proxy_pool: Option<Arc<ProxyPool>>,
 }
 
 impl AdminState {
@@ -69,6 +71,7 @@ impl AdminState {
             geo_resolver: None,
             suggestion_mode: None,
             persist_lock: Arc::new(parking_lot::Mutex::new(())),
+            proxy_pool: None,
         }
     }
 
@@ -114,6 +117,11 @@ impl AdminState {
 
     pub fn with_suggestion_mode(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.suggestion_mode = Some(flag);
+        self
+    }
+
+    pub fn with_proxy_pool(mut self, pool: Arc<ProxyPool>) -> Self {
+        self.proxy_pool = Some(pool);
         self
     }
 }
