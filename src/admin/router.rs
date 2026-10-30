@@ -20,11 +20,11 @@ use super::{
     handlers::{
         add_credential, delete_credential, get_all_credentials, get_auth_keys,
         get_client_token_passthrough, get_credential_balance, get_debug_logs, get_dump_kiro_body,
-        get_geo_batch, get_load_balancing_mode, get_runtime_config, get_suggestion_mode,
-        get_thinking_as_text, reset_failure_count, set_auth_keys, set_client_token_passthrough,
-        set_credential_disabled, set_credential_priority, set_debug_logs, set_dump_kiro_body,
-        set_load_balancing_mode, set_runtime_config, set_suggestion_mode, set_thinking_as_text,
-        update_credential,
+        get_geo_batch, get_load_balancing_mode, get_runtime_config, get_show_session_credits,
+        get_suggestion_mode, get_thinking_as_text, reset_failure_count, set_auth_keys,
+        set_client_token_passthrough, set_credential_disabled, set_credential_priority,
+        set_debug_logs, set_dump_kiro_body, set_load_balancing_mode, set_runtime_config,
+        set_show_session_credits, set_suggestion_mode, set_thinking_as_text, update_credential,
     },
     log_handler::{download_logs, snapshot_logs, stream_logs},
     middleware::{AdminState, admin_auth_middleware},
@@ -85,6 +85,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route(
             "/config/thinking-as-text",
             get(get_thinking_as_text).put(set_thinking_as_text),
+        )
+        .route(
+            "/config/show-session-credits",
+            get(get_show_session_credits).put(set_show_session_credits),
         )
         .route(
             "/config/dump-kiro-body",

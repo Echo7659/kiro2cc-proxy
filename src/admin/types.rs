@@ -452,6 +452,22 @@ pub struct SetThinkingAsTextRequest {
     pub enabled: bool,
 }
 
+/// 会话 credits 汇总行开关查询响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowSessionCreditsResponse {
+    /// 是否在对话结束时于回复末尾展示 turn / session credits
+    pub enabled: bool,
+}
+
+/// 设置会话 credits 汇总行开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetShowSessionCreditsRequest {
+    /// 是否在对话结束时于回复末尾展示 turn / session credits
+    pub enabled: bool,
+}
+
 /// Kiro 请求体落盘取证开关查询响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

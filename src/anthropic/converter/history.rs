@@ -22,10 +22,12 @@ use super::result::ConversionError;
 use super::thinking::{generate_thinking_prefix, gpt_anti_pseudo_tag_hint, has_thinking_tags};
 
 /// 历史 assistant 文本回传上游前的净化：先整块剥离文本化思考（标记行 + 正文 + 时长行），
-/// 再剥 dim 样式码（含模型模仿产生的字面 `[2m…[0m` 整行包裹），避免上游模型模仿该格式。
-/// 顺序不可颠倒：标记行识别依赖 dim 转义包裹的兼容判断。
+/// 再剥末尾的 credits 汇总行，最后剥 dim 样式码（含模型模仿产生的字面 `[2m…[0m` 整行包裹），
+/// 避免上游模型模仿该格式。
+/// 顺序不可颠倒：标记行与汇总行的识别都依赖 dim 转义包裹的兼容判断。
 fn sanitize_rendered_history_text(text: &str) -> String {
     let stripped = crate::anthropic::stream::strip_rendered_thinking(text);
+    let stripped = crate::anthropic::stream::strip_credits_footer(&stripped);
     crate::anthropic::stream::strip_dim_markers(&stripped).into_owned()
 }
 

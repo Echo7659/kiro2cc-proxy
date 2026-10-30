@@ -12,6 +12,7 @@ import {
   useSuggestionMode, useSetSuggestionMode,
   useClientTokenPassthrough, useSetClientTokenPassthrough,
   useThinkingAsText, useSetThinkingAsText,
+  useShowSessionCredits, useSetShowSessionCredits,
   useDumpKiroBody, useSetDumpKiroBody,
   useDebugLogs, useSetDebugLogs,
   useRuntimeConfig, useSetRuntimeConfig,
@@ -185,6 +186,8 @@ export function SettingsPanel({
   const { mutate: setTokenPassthrough, isPending: isSettingTokenPassthrough } = useSetClientTokenPassthrough()
   const { data: thinkingAsTextData, isError: thinkingAsTextError, isLoading: isLoadingThinkingAsText } = useThinkingAsText()
   const { mutate: setThinkingAsText, isPending: isSettingThinkingAsText } = useSetThinkingAsText()
+  const { data: showSessionCreditsData, isError: showSessionCreditsError, isLoading: isLoadingShowSessionCredits } = useShowSessionCredits()
+  const { mutate: setShowSessionCredits, isPending: isSettingShowSessionCredits } = useSetShowSessionCredits()
   const { data: dumpKiroBodyData, isError: dumpKiroBodyError, isLoading: isLoadingDumpKiroBody } = useDumpKiroBody()
   const { mutate: setDumpKiroBody, isPending: isSettingDumpKiroBody } = useSetDumpKiroBody()
   const { data: debugLogsData, isError: debugLogsError, isLoading: isLoadingDebugLogs } = useDebugLogs()
@@ -378,6 +381,19 @@ export function SettingsPanel({
               disabled={thinkingAsTextError || isLoadingThinkingAsText || isSettingThinkingAsText}
               onToggle={() =>
                 setThinkingAsText(!thinkingAsTextData?.enabled, {
+                  onSuccess: (d) => toast.success(d.message),
+                  onError: (e) => toast.error(extractErrorMessage(e)),
+                })
+              }
+            />
+          </Row>
+          <Row label={t('settings.showSessionCredits')} desc={showSessionCreditsError ? t('common.loadFailed') : t('settings.showSessionCreditsDesc')}>
+            <Sw
+              label={t('settings.showSessionCredits')}
+              on={!!showSessionCreditsData?.enabled}
+              disabled={showSessionCreditsError || isLoadingShowSessionCredits || isSettingShowSessionCredits}
+              onToggle={() =>
+                setShowSessionCredits(!showSessionCreditsData?.enabled, {
                   onSuccess: (d) => toast.success(d.message),
                   onError: (e) => toast.error(extractErrorMessage(e)),
                 })

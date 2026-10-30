@@ -230,6 +230,12 @@ pub async fn post_messages(
     // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
+    // credits 汇总行：须在 payload.messages / payload.tools 被 count_all_tokens 消费前判定
+    let credits_footer = crate::anthropic::stream::credits_footer_request(
+        &headers,
+        &payload.messages,
+        payload.tools.as_ref().is_some_and(|t| !t.is_empty()),
+    );
     // 每请求仅此一条 thinking 状态日志（流式 token 转发阶段不再输出）。
     // 双维度区分"客户端请求"与"实际生效"：
     // - 请求：客户端是否携带 thinking（enabled/adaptive），未携带 = 关闭
@@ -323,6 +329,7 @@ pub async fn post_messages(
             user_agent,
             cache_accounting,
             conversation_id,
+            credits_footer,
         )
         .await
     } else {

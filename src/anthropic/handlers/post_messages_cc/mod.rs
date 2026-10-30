@@ -224,6 +224,12 @@ pub async fn post_messages_cc(
     // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
+    // credits 汇总行：须在 payload.messages / payload.tools 被 count_all_tokens 消费前判定
+    let credits_footer = crate::anthropic::stream::credits_footer_request(
+        &headers,
+        &payload.messages,
+        payload.tools.as_ref().is_some_and(|t| !t.is_empty()),
+    );
     let input_tokens = token::count_all_tokens_with_prefix(
         payload.model.clone(),
         payload.system,
@@ -284,6 +290,7 @@ pub async fn post_messages_cc(
             user_agent,
             cache_accounting,
             conversation_id,
+            credits_footer,
         )
         .await
     } else {

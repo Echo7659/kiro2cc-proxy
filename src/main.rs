@@ -120,6 +120,12 @@ async fn main() {
     anthropic::set_output_tokens_include_thinking(config.output_tokens_include_thinking);
     anthropic::set_models_official_aliases(config.models_official_aliases);
     anthropic::set_thinking_as_text(config.thinking_as_text);
+    anthropic::set_show_session_credits(config.show_session_credits);
+    if config.show_session_credits {
+        tracing::info!(
+            "会话 credits 汇总行已开启（showSessionCredits=true）：Claude Code 每次对话结束时在末尾展示 turn / session 消耗"
+        );
+    }
     anthropic::set_write_chunking_max_lines(config.write_chunking_max_lines);
     anthropic::set_kiro_body_dump_enabled(config.dump_kiro_body);
     if config.dump_kiro_body {

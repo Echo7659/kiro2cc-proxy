@@ -183,6 +183,18 @@ export async function setThinkingAsText(enabled: boolean): Promise<{ success: bo
   return data
 }
 
+// 获取会话 credits 汇总行开关
+export async function getShowSessionCredits(): Promise<{ enabled: boolean }> {
+  const { data } = await api.get<{ enabled: boolean }>('/config/show-session-credits')
+  return data
+}
+
+// 设置会话 credits 汇总行开关
+export async function setShowSessionCredits(enabled: boolean): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.put<{ success: boolean; message: string }>('/config/show-session-credits', { enabled })
+  return data
+}
+
 // 获取 Kiro 请求体落盘取证开关
 export async function getDumpKiroBody(): Promise<{ enabled: boolean }> {
   const { data } = await api.get<{ enabled: boolean }>('/config/dump-kiro-body')

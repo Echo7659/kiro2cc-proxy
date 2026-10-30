@@ -492,6 +492,54 @@ fn test_rendered_thinking_header_stripped_from_assistant_history() {
 }
 
 #[test]
+fn test_credits_footer_stripped_from_assistant_history() {
+    // showSessionCredits 开启时，客户端会把末尾的汇总行当正文回传；
+    // 回传上游前必须剥掉（ANSI 与 Markdown 两种样式），且保持历史逐字节等同于没有汇总行
+    use crate::anthropic::types::{Message as AnthropicMessage, MessagesRequest};
+    let build = |assistant_text: &str| MessagesRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        max_tokens: 2048,
+        messages: vec![
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("q1"),
+            },
+            AnthropicMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!([{"type": "text", "text": assistant_text}]),
+            },
+            AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("q2"),
+            },
+        ],
+        stream: false,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        output_config: None,
+        metadata: None,
+    };
+    let history_of = |text: &str| {
+        let r = convert_request(&build(text)).unwrap();
+        serde_json::to_string(&r.conversation_state.history).unwrap()
+    };
+
+    let clean = history_of("最终答案");
+    let ansi =
+        history_of("最终答案\n\n\u{1b}[2m▸ Credits: turn 0.86 • session 8.73 | Time: 12s\u{1b}[0m");
+    let plain = history_of("最终答案\n\n*▸ Credits: turn 0.86 • session 8.73 | Time: 12s*");
+
+    assert!(clean.contains("最终答案"));
+    assert!(!ansi.contains("Credits:"), "{ansi}");
+    assert!(!plain.contains("Credits:"), "{plain}");
+    // 历史逐字节稳定：prompt cache 不会因汇总行失效
+    assert_eq!(ansi, clean);
+    assert_eq!(plain, clean);
+}
+
+#[test]
 fn test_rendered_thinking_block_fully_dropped_from_assistant_history() {
     // 完整的文本化思考块（标记行 + 正文 + 时长行）整块不回传上游；
     // 思考块后的答案与工具调用保留，纯思考 + 工具调用的消息不会留下空 content
