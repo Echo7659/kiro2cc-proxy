@@ -2,15 +2,17 @@
 import { useRef, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
-import { Bug, History, Info, Monitor, Pencil, Palette, Server, ShieldCheck, type LucideIcon } from 'lucide-react'
+import { Bug, Download, History, Info, Monitor, Pencil, Palette, Server, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PageHead } from '@/components/page-head'
+import { DumpFilesDialog } from '@/components/dump-files-dialog'
 import {
   useLoadBalancingMode, useSetLoadBalancingMode,
   useSuggestionMode, useSetSuggestionMode,
   useClientTokenPassthrough, useSetClientTokenPassthrough,
   useThinkingAsText, useSetThinkingAsText,
+  useShowSessionCredits, useSetShowSessionCredits,
   useDumpKiroBody, useSetDumpKiroBody,
   useDebugLogs, useSetDebugLogs,
   useRuntimeConfig, useSetRuntimeConfig,
@@ -184,6 +186,8 @@ export function SettingsPanel({
   const { mutate: setTokenPassthrough, isPending: isSettingTokenPassthrough } = useSetClientTokenPassthrough()
   const { data: thinkingAsTextData, isError: thinkingAsTextError, isLoading: isLoadingThinkingAsText } = useThinkingAsText()
   const { mutate: setThinkingAsText, isPending: isSettingThinkingAsText } = useSetThinkingAsText()
+  const { data: showSessionCreditsData, isError: showSessionCreditsError, isLoading: isLoadingShowSessionCredits } = useShowSessionCredits()
+  const { mutate: setShowSessionCredits, isPending: isSettingShowSessionCredits } = useSetShowSessionCredits()
   const { data: dumpKiroBodyData, isError: dumpKiroBodyError, isLoading: isLoadingDumpKiroBody } = useDumpKiroBody()
   const { mutate: setDumpKiroBody, isPending: isSettingDumpKiroBody } = useSetDumpKiroBody()
   const { data: debugLogsData, isError: debugLogsError, isLoading: isLoadingDebugLogs } = useDebugLogs()
@@ -201,6 +205,8 @@ export function SettingsPanel({
     proxyUrl: '',
   })
   const [editingRuntime, setEditingRuntime] = useState<'maxRpm' | 'chunkLines' | 'port' | 'proxyUrl' | null>(null)
+  // dump 文件浏览弹窗开关；弹窗关闭时列表查询不下发请求
+  const [dumpFilesOpen, setDumpFilesOpen] = useState(false)
 
   const lang = i18n.language === 'en' ? 'en' : 'zh'
 
@@ -386,6 +392,19 @@ export function SettingsPanel({
               }
             />
           </Row>
+          <Row label={t('settings.showSessionCredits')} desc={showSessionCreditsError ? t('common.loadFailed') : t('settings.showSessionCreditsDesc')}>
+            <Sw
+              label={t('settings.showSessionCredits')}
+              on={!!showSessionCreditsData?.enabled}
+              disabled={showSessionCreditsError || isLoadingShowSessionCredits || isSettingShowSessionCredits}
+              onToggle={() =>
+                setShowSessionCredits(!showSessionCreditsData?.enabled, {
+                  onSuccess: (d) => toast.success(d.message),
+                  onError: (e) => toast.error(extractErrorMessage(e)),
+                })
+              }
+            />
+          </Row>
           <Row label={t('settings.maxRpmPerCredential')} desc={t('settings.maxRpmPerCredentialDesc')}>
             {editingRuntime === 'maxRpm' ? (
               runtimeEditor(
@@ -537,6 +556,16 @@ export function SettingsPanel({
 
         <Section icon={Bug} title={t('settings.capDebug')}>
           <Row label={t('settings.dumpKiroBody')} desc={dumpKiroBodyError ? t('common.loadFailed') : t('settings.dumpKiroBodyDesc')}>
+            {/* 不随开关置灰：开关读取失败（dumpKiroBodyError）时落盘历史仍可下载 */}
+            <Button
+              type="button"
+              variant="outline"
+              aria-label={t('settings.downloadDumpFiles')}
+              onClick={() => setDumpFilesOpen(true)}
+            >
+              <Download aria-hidden="true" />
+              <span className="hidden sm:inline">{t('settings.downloadDumpFiles')}</span>
+            </Button>
             <Sw
               label={t('settings.dumpKiroBody')}
               on={!!dumpKiroBodyData?.enabled}
@@ -573,6 +602,8 @@ export function SettingsPanel({
           </Row>
         </Section>
       </div>
+
+      <DumpFilesDialog open={dumpFilesOpen} onOpenChange={setDumpFilesOpen} />
     </div>
   )
 }

@@ -27,6 +27,7 @@ import type {
   ProxiesResponse,
   ProxySummary,
   ImportProxiesResponse,
+  DumpFilesResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -215,6 +216,18 @@ export async function setThinkingAsText(enabled: boolean): Promise<{ success: bo
   return data
 }
 
+// 获取会话 credits 汇总行开关
+export async function getShowSessionCredits(): Promise<{ enabled: boolean }> {
+  const { data } = await api.get<{ enabled: boolean }>('/config/show-session-credits')
+  return data
+}
+
+// 设置会话 credits 汇总行开关
+export async function setShowSessionCredits(enabled: boolean): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.put<{ success: boolean; message: string }>('/config/show-session-credits', { enabled })
+  return data
+}
+
 // 获取 Kiro 请求体落盘取证开关
 export async function getDumpKiroBody(): Promise<{ enabled: boolean }> {
   const { data } = await api.get<{ enabled: boolean }>('/config/dump-kiro-body')
@@ -236,6 +249,12 @@ export async function getDebugLogs(): Promise<{ enabled: boolean }> {
 // 设置 DEBUG 日志开关（全局热生效：控制台 / 日志文件 / 日志页三处一致）
 export async function setDebugLogs(enabled: boolean): Promise<{ success: boolean; message: string }> {
   const { data } = await api.put<{ success: boolean; message: string }>('/config/debug-logs', { enabled })
+  return data
+}
+
+// 获取 dump 落盘文件清单（仅 JSON；二进制下载走 fetch + Blob，不经本层）
+export async function getDumpFiles(): Promise<DumpFilesResponse> {
+  const { data } = await api.get<DumpFilesResponse>('/dump-kiro-body/files')
   return data
 }
 

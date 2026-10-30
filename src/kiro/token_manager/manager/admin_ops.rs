@@ -197,6 +197,73 @@ impl MultiTokenManager {
             || update.machine_id.is_some()
     }
 
+    /// 更新请求是否需要先用新凭据试刷新一次再写入。
+    ///
+    /// `effective` 是应用本次更新之后的账号（认证方式以更新后的为准）。除 `refreshToken` 外，
+    /// `clientId` / `clientSecret` 设为非空新值也必须验证：它们写错后账号当前的 accessToken
+    /// 仍然有效、面板上显示「健康」，要等 token 到期刷新才报 `invalid_client` 并累计失败次数
+    /// 被禁用，故障很难与那次编辑联系起来（issue #58：浏览器把管理密码自动填进 Client Secret
+    /// 框，保存后被当作 clientSecret 写入）。
+    ///
+    /// `clientSecret` 只在 IdC（OIDC）刷新里参与请求；external_idp 是公共客户端、social 不用
+    /// 它，对这两类账号试刷新验证不到新值，只会空转，故仅对 IdC 触发。
+    /// 空串表示清除，不涉及新凭据，不需要验证。
+    pub(crate) fn update_requires_revalidation(
+        update: &crate::admin::types::UpdateCredentialRequest,
+        effective: &KiroCredentials,
+    ) -> bool {
+        let non_empty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+        update.refresh_token.is_some()
+            || non_empty(&update.client_id)
+            || (effective.is_idc() && non_empty(&update.client_secret))
+    }
+
+    /// 本次更新涉及的字段名（驼峰，与 API 字段一致），仅用于日志，不含任何字段值。
+    ///
+    /// 对 `UpdateCredentialRequest` 做穷尽解构（不写 `..`）：结构体新增字段而这里没同步时
+    /// 编译直接报错，不会静默漏掉该字段的审计日志。
+    pub(crate) fn updated_field_names(
+        update: &crate::admin::types::UpdateCredentialRequest,
+    ) -> Vec<&'static str> {
+        let crate::admin::types::UpdateCredentialRequest {
+            refresh_token,
+            auth_method,
+            client_id,
+            client_secret,
+            profile_arn,
+            auth_region,
+            api_region,
+            machine_id,
+            email,
+            nickname,
+            proxy_url,
+            proxy_username,
+            proxy_password,
+            provider,
+            thinking_adaptive,
+        } = update;
+        [
+            ("refreshToken", refresh_token.is_some()),
+            ("authMethod", auth_method.is_some()),
+            ("clientId", client_id.is_some()),
+            ("clientSecret", client_secret.is_some()),
+            ("profileArn", profile_arn.is_some()),
+            ("authRegion", auth_region.is_some()),
+            ("apiRegion", api_region.is_some()),
+            ("machineId", machine_id.is_some()),
+            ("email", email.is_some()),
+            ("nickname", nickname.is_some()),
+            ("proxyUrl", proxy_url.is_some()),
+            ("proxyUsername", proxy_username.is_some()),
+            ("proxyPassword", proxy_password.is_some()),
+            ("provider", provider.is_some()),
+            ("thinkingAdaptive", thinking_adaptive.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+    }
+
     /// 比对「会影响上游返回内容」的身份字段。
     ///
     /// 不包含 `provider`：它除被 `fallback_profile_arn_value` 用于判定 Enterprise 备用 ARN 外，
@@ -843,7 +910,7 @@ impl MultiTokenManager {
 
     /// 更新账号配置（Admin API）
     ///
-    /// 只更新提供的字段，不会触发 token 刷新验证（除非 refreshToken 变更）
+    /// 只更新提供的字段，不会触发 token 刷新验证（除非 refreshToken 变更，或 clientId 设为非空新值、IdC 账号的 clientSecret 设为非空新值；验证失败则不写入）
     pub async fn update_credential(
         &self,
         id: u64,
@@ -889,52 +956,23 @@ impl MultiTokenManager {
             }
         }
 
-        // 如果 refreshToken 变更，需要重新验证
-        let needs_revalidation = update.refresh_token.is_some();
+        // 试刷新按完整更新预览发起，同时在替换刷新材料前固定原账号指纹。
+        // 新 clientId / IdC clientSecret 必须实际刷新验证，不能因 accessToken 尚有效而跳过。
+        let mut temp_cred = {
+            let entries = self.entries.lock();
+            let entry = entries.iter().find(|e| e.id == id).unwrap();
+            let mut cred = entry.credentials.clone();
+            machine_id::ensure_fixed_machine_id(&mut cred, &self.config);
+            if let Some(ref rt) = update.refresh_token {
+                cred.refresh_token = Some(rt.clone());
+            }
+            Self::apply_update_fields(&mut cred, &update);
+            cred
+        };
+        let needs_revalidation = Self::update_requires_revalidation(&update, &temp_cred);
 
         if needs_revalidation {
-            // 先构建临时账号用于验证
-            let mut temp_cred = {
-                let entries = self.entries.lock();
-                let entry = entries.iter().find(|e| e.id == id).unwrap();
-                let mut cred = entry.credentials.clone();
-                // 在更换刷新材料之前固定原账号身份，避免设备标识跟随 Token 变化。
-                machine_id::ensure_fixed_machine_id(&mut cred, &self.config);
-                if let Some(ref rt) = update.refresh_token {
-                    cred.refresh_token = Some(rt.clone());
-                }
-                if let Some(ref am) = update.auth_method {
-                    cred.auth_method = Some(am.clone());
-                }
-                if let Some(ref ci) = update.client_id {
-                    cred.client_id = Some(ci.clone());
-                }
-                if let Some(ref cs) = update.client_secret {
-                    cred.client_secret = Some(cs.clone());
-                }
-                if let Some(ref ar) = update.auth_region {
-                    cred.auth_region = if ar.is_empty() {
-                        None
-                    } else {
-                        Some(ar.clone())
-                    };
-                }
-                if let Some(ref ar) = update.api_region {
-                    cred.api_region = if ar.is_empty() {
-                        None
-                    } else {
-                        Some(ar.clone())
-                    };
-                }
-                if let Some(ref machine_id) = update.machine_id {
-                    cred.machine_id = Some(machine_id.clone());
-                }
-                Self::apply_update_fields(&mut cred, &update);
-                cred
-            };
-
             self.prepare_proxy_binding(&mut temp_cred).await?;
-
             let mut proxy_reservation = self.reserve_new_proxy_binding(&mut temp_cred)?;
             let validated = self
                 .validate_candidate_with_proxy(&mut temp_cred, &mut proxy_reservation)
@@ -945,6 +983,7 @@ impl MultiTokenManager {
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.invalidate_recovery();
                 entry.credentials.access_token = validated.access_token;
+                entry.credentials.sso_access_token = validated.sso_access_token;
                 entry.credentials.machine_id = validated.machine_id;
                 entry.credentials.expires_at = validated.expires_at;
                 entry.credentials.proxy_pool_id = validated.proxy_pool_id;
@@ -964,7 +1003,7 @@ impl MultiTokenManager {
                 entry.failure_count = 0;
             }
         } else {
-            // 不涉及 refreshToken 变更，直接更新配置字段
+            // 不涉及需验证的凭据字段，直接更新配置字段
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.invalidate_recovery();
@@ -978,7 +1017,18 @@ impl MultiTokenManager {
 
         self.persist_credentials()?;
         self.save_stats();
-        tracing::info!("成功更新账号 #{}", id);
+        // 只记录字段名不记录值：clientSecret / refreshToken / proxyPassword 等是敏感信息，
+        // 事后排查「是否有人改过这些字段」时靠这行日志
+        tracing::info!(
+            "成功更新账号 #{}，涉及字段: [{}]{}",
+            id,
+            Self::updated_field_names(&update).join(", "),
+            if needs_revalidation {
+                "（已用新凭据试刷新验证）"
+            } else {
+                ""
+            }
+        );
         Ok(())
     }
 

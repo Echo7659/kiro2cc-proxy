@@ -16,8 +16,11 @@ import {
   setClientTokenPassthrough,
   getThinkingAsText,
   setThinkingAsText,
+  getShowSessionCredits,
+  setShowSessionCredits,
   getDumpKiroBody,
   setDumpKiroBody,
+  getDumpFiles,
   getDebugLogs,
   setDebugLogs,
   getRuntimeConfig,
@@ -258,6 +261,25 @@ export function useSetThinkingAsText() {
   })
 }
 
+// 获取会话 credits 汇总行开关
+export function useShowSessionCredits() {
+  return useQuery({
+    queryKey: ['showSessionCredits'],
+    queryFn: getShowSessionCredits,
+  })
+}
+
+// 设置会话 credits 汇总行开关
+export function useSetShowSessionCredits() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setShowSessionCredits,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['showSessionCredits'] })
+    },
+  })
+}
+
 // 获取 Kiro 请求体落盘取证开关
 export function useDumpKiroBody() {
   return useQuery({
@@ -274,6 +296,15 @@ export function useSetDumpKiroBody() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dumpKiroBody'] })
     },
+  })
+}
+
+// 查询 dump 落盘文件清单（`enabled` 由弹窗开关状态驱动，弹窗关闭时不请求）
+export function useDumpFiles(enabled: boolean) {
+  return useQuery({
+    queryKey: ['dumpFiles'],
+    queryFn: getDumpFiles,
+    enabled,
   })
 }
 

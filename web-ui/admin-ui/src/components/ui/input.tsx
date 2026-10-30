@@ -17,8 +17,29 @@ export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElem
   prefix?: React.ReactNode
 }
 
+/** password 输入框默认禁用浏览器 / 密码管理器的自动填充（issue #58）。
+ *  管理面板的登录页保存了管理密码，浏览器会把它填进账号弹窗里的 Client Secret 等 password
+ *  框；这些框「留空 = 不修改」，用户看到一串圆点以为是原值，保存后管理密码就被当成
+ *  clientSecret 提交。调用方显式传了 autoComplete（如登录页的 current-password）时不干预，
+ *  以免挡住登录页自身的密码管理器。
+ *  Safari / iCloud 钥匙串、KeePassXC 等没有等价的忽略属性，只能靠 autoComplete 语义兜底；
+ *  后端对 clientId / clientSecret 的试刷新验证是不依赖浏览器行为的最终防线。 */
+function passwordGuardAttrs(
+  type: string | undefined,
+  autoComplete: string | undefined
+): React.InputHTMLAttributes<HTMLInputElement> & Record<`data-${string}`, string> {
+  if (type !== 'password' || autoComplete !== undefined) return {}
+  return {
+    autoComplete: 'new-password', // 浏览器：声明这是「新密码」而非登录凭据
+    'data-1p-ignore': 'true', // 1Password
+    'data-lpignore': 'true', // LastPass
+    'data-bwignore': 'true', // Bitwarden
+  }
+}
+
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, type, unit, prefix, ...props }, ref) => {
+    const guard = passwordGuardAttrs(type, props.autoComplete)
     if (unit || prefix) {
       return (
         <div
@@ -33,6 +54,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             type={type}
             className={cn(FIELD_CONTROL, 'min-w-0 flex-1', className)}
             ref={ref}
+            {...guard}
             {...props}
           />
           {unit && <span className="shrink-0 text-[11px] text-ink-3">{unit}</span>}
@@ -50,6 +72,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
           className
         )}
         ref={ref}
+        {...guard}
         {...props}
       />
     )

@@ -4,6 +4,7 @@
 
 mod calib;
 mod context;
+mod credits_footer;
 mod echo_guard;
 mod helpers;
 mod state;
@@ -20,6 +21,11 @@ pub use calib::{
     set_output_tokens_include_thinking,
 };
 pub use context::StreamContext;
+pub(crate) use credits_footer::strip_credits_footer;
+pub use credits_footer::{
+    CreditsFooterRequest, begin_request, credits_footer_request, record_credits, render_footer,
+    set_show_session_credits, show_session_credits_enabled,
+};
 pub(crate) use echo_guard::ResponseEchoGuard;
 pub(crate) use helpers::generate_fake_signature;
 pub use state::SseEvent;
@@ -32,8 +38,6 @@ pub(crate) use thinking_text::{strip_dim_markers, strip_rendered_thinking};
 
 #[cfg(test)]
 pub(crate) use calib::context_window_for_model;
-#[cfg(test)]
-pub(crate) use helpers::{count_token_chars, tokens_from_chars};
 #[cfg(test)]
 pub(crate) use state::SseStateManager;
 #[cfg(test)]

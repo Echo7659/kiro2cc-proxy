@@ -249,6 +249,16 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub thinking_as_text: bool,
 
+    /// 会话结束时在回复末尾展示 credits 汇总行（仅 Claude Code 客户端）
+    ///
+    /// 开启后，每次对话真正结束（stop_reason=end_turn）时追加一行
+    /// `▸ Credits: turn 0.86 • session 8.73 | Time: 12s`，格式对齐 Kiro CLI：
+    /// turn = 本轮所有上游请求的 credits 之和，session = 同一会话自开启以来的累计，
+    /// Time = 本轮耗时。累计值由代理按上游 meteringEvent 逐请求累加（上游本身不返回累计），
+    /// 进程重启后清零。回传历史时该行会被自动剥离，上游看不到。默认 false。
+    #[serde(default)]
+    pub show_session_credits: bool,
+
     /// 分块写入约束的行数上限（issue #46）
     ///
     /// 请求带 Write / Edit / MultiEdit 工具时，代理在系统提示末尾追加“单次工具调用参数不超过
@@ -423,6 +433,7 @@ impl Default for Config {
             output_tokens_include_thinking: false,
             forward_suggestion_mode: false,
             thinking_as_text: true,
+            show_session_credits: false,
             write_chunking_max_lines: default_write_chunking_max_lines(),
             dump_kiro_body: false,
             log_file: None,
@@ -725,6 +736,11 @@ impl Config {
         {
             self.thinking_as_text = b;
         }
+        if let Ok(v) = env::var("SHOW_SESSION_CREDITS")
+            && let Ok(b) = v.parse::<bool>()
+        {
+            self.show_session_credits = b;
+        }
         if let Ok(v) = env::var("WRITE_CHUNKING_MAX_LINES")
             && let Ok(n) = v.parse::<u32>()
         {
@@ -938,6 +954,15 @@ mod tests {
         // 缺省该字段时必须为 true（新用户默认开启思考文本化展示）
         let config: Config = serde_json::from_str("{}").unwrap();
         assert!(config.thinking_as_text);
+    }
+
+    #[test]
+    fn test_show_session_credits_defaults_to_false() {
+        assert!(!Config::default().show_session_credits);
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!config.show_session_credits);
+        let config: Config = serde_json::from_str(r#"{"showSessionCredits": true}"#).unwrap();
+        assert!(config.show_session_credits);
     }
 
     #[test]

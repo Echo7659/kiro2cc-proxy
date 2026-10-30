@@ -21,6 +21,7 @@
 mod api_keys;
 mod changelog;
 mod changelog_data;
+mod dump_handler;
 mod error;
 mod handlers;
 mod log_handler;
@@ -30,6 +31,7 @@ mod proxies;
 mod router;
 mod service;
 pub mod types;
+mod zip;
 
 pub use middleware::AdminState;
 pub use router::create_admin_router;

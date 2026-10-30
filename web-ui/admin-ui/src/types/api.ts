@@ -397,3 +397,21 @@ export interface FailureLogsResponse {
   pageSize: number
   totalPages: number
 }
+
+// 单个 dump 文件元数据（后端 /dump-kiro-body/files，字段为 camelCase 序列化）
+export interface DumpFileMeta {
+  name: string
+  sizeBytes: number
+  /** 取文件名内毫秒时间戳，不取文件系统 mtime（后端决策 9） */
+  createdAtMs: number
+}
+
+// dump 文件清单响应（后端 /dump-kiro-body/files）
+export interface DumpFilesResponse {
+  files: DumpFileMeta[]
+  totalBytes: number
+  /** 后端保留的 dump 文件数上限，用于向管理员展示滚动清理语义 */
+  maxFiles: number
+  /** 归档总量上限，前端据此判断是否提示截断，不硬编码阈值 */
+  maxArchiveBytes: number
+}

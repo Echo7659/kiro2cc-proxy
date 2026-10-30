@@ -146,6 +146,7 @@ pub async fn post_messages(
     let is_compact_request = conversion_result.is_compact_request;
     // 客户端是否请求了 thinking adaptive（与账号级开关在 provider 侧共同决定注入）
     let thinking_adaptive_requested = conversion_result.thinking_adaptive_requested;
+    let prefix_cached = conversion_result.prefix_cached;
 
     // web_search server tool 桥接上下文（D5/D7：未携带时为 None，零行为变化）
     // 必须在 KiroRequest 构建（conversation_state 被 move）前构造
@@ -154,6 +155,9 @@ pub async fn post_messages(
         state.profile_arn.clone(),
         bound_ids.clone(),
     );
+
+    // 会话 conversationId（cache-miss 诊断用）；须在 conversation_state move 前取出
+    let conversation_id = Some(conversion_result.conversation_state.conversation_id.clone());
 
     // 构建 Kiro 请求
     let kiro_request = KiroRequest {
@@ -219,21 +223,19 @@ pub async fn post_messages(
     });
 
     // 估算"缓存前缀" token 数（system + tools + history 除最后一条 user 外的全部）
-    // 必须在 count_all_tokens 消费 payload 之前先借用计算。
-    let prefix_estimated_tokens = {
-        let n = payload.messages.len();
-        let prior: &[_] = if n > 0 {
-            &payload.messages[..n - 1]
-        } else {
-            &[]
-        };
-        token::count_prefix_tokens(payload.system.as_deref(), prior, payload.tools.as_deref())
-            as i32
-    };
+    // 必须在 count_all_tokens 消费 payload 之前先借用计算（口径与门控见 helpers::estimate_prefix_tokens）
+    let (raw_prefix_tokens, prefix_estimated_tokens) =
+        super::helpers::estimate_prefix_tokens(&payload, prefix_cached);
 
     // 估算输入 tokens（复用上方已计算的 prefix_estimated_tokens，避免重复编码历史消息）
     // 先取出 thinking_enabled 判断所需字段，避免 payload.tools 等被移动后无法整体借用
     let thinking_enabled = resolve_thinking_enabled(&payload.model, &payload.thinking);
+    // credits 汇总行：须在 payload.messages / payload.tools 被 count_all_tokens 消费前判定
+    let credits_footer = crate::anthropic::stream::credits_footer_request(
+        &headers,
+        &payload.messages,
+        payload.tools.as_ref().is_some_and(|t| !t.is_empty()),
+    );
     // 每请求仅此一条 thinking 状态日志（流式 token 转发阶段不再输出）。
     // 双维度区分"客户端请求"与"实际生效"：
     // - 请求：客户端是否携带 thinking（enabled/adaptive），未携带 = 关闭
@@ -273,7 +275,7 @@ pub async fn post_messages(
         payload.system,
         payload.messages,
         payload.tools,
-        prefix_estimated_tokens as u64,
+        raw_prefix_tokens,
     ) as i32;
 
     // 提取用量追踪信息
@@ -326,6 +328,8 @@ pub async fn post_messages(
             thinking_as_text,
             user_agent,
             cache_accounting,
+            conversation_id,
+            credits_footer,
         )
         .await
     } else {
@@ -351,6 +355,7 @@ pub async fn post_messages(
             thinking_enabled,
             user_agent,
             cache_accounting,
+            conversation_id,
         )
         .await
     }
@@ -378,80 +383,23 @@ pub fn kiro_body_dump_enabled() -> bool {
 }
 
 fn dump_kiro_request_body(request_body: &str) {
-    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const MAX_DUMP_FILES: usize = 200;
-    const COLLISION_RETRIES: usize = 5;
-
-    let dir = std::path::Path::new("app/config/kiro-body-dump");
-    if std::fs::create_dir_all(dir).is_err() {
-        tracing::warn!("[BODY-DUMP] 创建 dump 目录失败");
-        return;
-    }
-    // 按文件名排序（毫秒时间戳命名天然按时间有序），保留最近 MAX_DUMP_FILES 个，
-    // 防止长时间开启落盘取证后磁盘无限增长
-    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
-                .collect()
-        })
-        .unwrap_or_default();
-    if entries.len() >= MAX_DUMP_FILES {
-        entries.sort();
-        let excess = entries.len() - MAX_DUMP_FILES + 1;
-        for stale in &entries[..excess] {
-            if let Err(e) = std::fs::remove_file(stale) {
-                tracing::warn!(
-                    "[BODY-DUMP] 清理旧 dump 文件失败 {}: {}",
-                    stale.display(),
-                    e
-                );
-            }
-        }
-    }
+    // 毫秒时间戳远小于 u64 上限，收敛到 u64 与 dump 模块命名口径一致
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or_default();
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.mode(0o600);
+    // 目录创建、滚动清理（含与列表端点同源的命名谓词）、0600 权限与冲突重试
+    // 均由 common::dump 承担，避免此处与 admin 下载侧出现两份字面量而漂移
+    match crate::common::dump::write_dump_body_in(
+        std::path::Path::new(crate::common::dump::DUMP_DIR),
+        request_body,
+        ts,
+    ) {
+        Ok(path) => tracing::info!("[BODY-DUMP] 已写入 {}", path.display()),
+        Err(e) => tracing::warn!("[BODY-DUMP] 写入失败: {}", e),
     }
-    // 命名与边界对齐：共 MAX_FILENAME_ATTEMPTS 次尝试（含首次），COLLISION_RETRIES 为重试上限
-    const MAX_FILENAME_ATTEMPTS: usize = COLLISION_RETRIES + 1;
-    let mut path = dir.join(format!("body-{ts}.json"));
-    for attempt in 0..MAX_FILENAME_ATTEMPTS {
-        path = dir.join(if attempt == 0 {
-            format!("body-{ts}.json")
-        } else {
-            format!("body-{ts}-{attempt}.json")
-        });
-        let result = open
-            .open(&path)
-            .and_then(|mut f| f.write_all(request_body.as_bytes()));
-        match result {
-            Ok(()) => {
-                tracing::info!("[BODY-DUMP] 已写入 {}", path.display());
-                return;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                tracing::warn!("[BODY-DUMP] 写入失败: {}", e);
-                return;
-            }
-        }
-    }
-    tracing::warn!(
-        "[BODY-DUMP] 写入失败: 文件名冲突重试 {} 次仍失败（{}）",
-        COLLISION_RETRIES,
-        path.display()
-    );
 }
 
 #[cfg(test)]

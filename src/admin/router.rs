@@ -16,14 +16,15 @@ use super::{
         list_api_keys, reset_key_usage, update_api_key,
     },
     changelog::get_changelog,
+    dump_handler::{download_dump_archive, download_dump_file, list_dump_files_handler},
     handlers::{
         add_credential, delete_credential, get_all_credentials, get_auth_keys,
         get_client_token_passthrough, get_credential_balance, get_debug_logs, get_dump_kiro_body,
-        get_geo_batch, get_load_balancing_mode, get_runtime_config, get_suggestion_mode,
-        get_thinking_as_text, reset_failure_count, set_auth_keys, set_client_token_passthrough,
-        set_credential_disabled, set_credential_priority, set_debug_logs, set_dump_kiro_body,
-        set_load_balancing_mode, set_runtime_config, set_suggestion_mode, set_thinking_as_text,
-        update_credential,
+        get_geo_batch, get_load_balancing_mode, get_runtime_config, get_show_session_credits,
+        get_suggestion_mode, get_thinking_as_text, reset_failure_count, set_auth_keys,
+        set_client_token_passthrough, set_credential_disabled, set_credential_priority,
+        set_debug_logs, set_dump_kiro_body, set_load_balancing_mode, set_runtime_config,
+        set_show_session_credits, set_suggestion_mode, set_thinking_as_text, update_credential,
     },
     log_handler::{download_logs, snapshot_logs, stream_logs},
     middleware::{AdminState, admin_auth_middleware},
@@ -96,6 +97,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
             get(get_thinking_as_text).put(set_thinking_as_text),
         )
         .route(
+            "/config/show-session-credits",
+            get(get_show_session_credits).put(set_show_session_credits),
+        )
+        .route(
             "/config/dump-kiro-body",
             get(get_dump_kiro_body).put(set_dump_kiro_body),
         )
@@ -123,6 +128,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/usage/daily/{date}/records", get(get_daily_usage_records))
         .route("/usage/records", get(get_usage_records))
         .route("/geo/batch", get(get_geo_batch))
+        // dump 落盘文件的浏览与下载（列表 / 单文件 / 全量 ZIP）
+        .route("/dump-kiro-body/files", get(list_dump_files_handler))
+        .route("/dump-kiro-body/files/{name}", get(download_dump_file))
+        .route("/dump-kiro-body/archive", get(download_dump_archive))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

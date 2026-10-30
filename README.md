@@ -526,6 +526,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | `outputTokensIncludeThinking` | 否 | `false` | `true` 时返回给客户端的 `output_tokens` 包含 thinking（与 Anthropic 官方口径一致）；`false`（默认）只计可见输出。可用环境变量 `OUTPUT_TOKENS_INCLUDE_THINKING` 覆盖 |
 | `writeChunkingMaxLines` | 否 | `300` | 分块写入约束的行数上限（见常见问题中 `Reset(StreamId(1), INTERNAL_ERROR, Remote)` 一条）：请求带 Write / Edit / MultiEdit 工具时，在系统提示末尾要求单次工具调用的参数不超过约 N 行。调大更省 credits 但更易触发上游约 240s 的流重置，`0` 表示不追加约束。可在 Admin 设置页热修改，仅影响之后的新请求。可用环境变量 `WRITE_CHUNKING_MAX_LINES` 覆盖 |
 | `thinkingAsText` | 否 | `true` | 思考内容文本化（Claude Code / Claude Desktop 客户端）：`true` 时把 thinking 块改写为 markdown 引用文本、逐行流式展示（类似 Kiro CLI；终端入口 `cli` 用 ANSI 变暗斜体样式，Claude Desktop、`local-agent` 等其他入口改用无转义的 Markdown 引用块 + 斜体来近似变暗，避免出现 `[2m` / `[0m` 乱码），解决 CC 默认折叠/隐藏 thinking 导致长推理期间像卡住的问题。两种模式下客户端（Claude Code）上下文都包含思考内容，但回传上游时都会整块丢弃：关闭时丢弃原生 thinking 块，开启时丢弃「💭 Thinking」标记行、思考正文与时长行，上游上下文不含思考内容（仅当流被中断、缺少时长行时，保守降级为只剥标记行）。可用环境变量 `THINKING_AS_TEXT` 覆盖 |
+| `showSessionCredits` | 否 | `false` | 会话 credits 汇总行（仅 Claude Code 客户端）：`true` 时，每次对话真正结束（`end_turn`，工具调用中间步骤不显示）会在回复末尾追加一行 `▸ Credits: turn 0.86 • session 8.73 \| Time: 12s`，格式对齐 Kiro CLI。`turn` 为本轮（一次提问下所有请求，含工具往返）的 credits 之和，`session` 为当前会话自开启以来的累计，`Time` 为本轮耗时。上游 `meteringEvent` 只返回单次请求的用量、不带累计值，所以累计由代理逐请求累加，重启服务后清零。终端入口 `cli` 为变暗灰色，其他入口为无转义的 Markdown 斜体。该行回传上游前自动剥离，不进入上游上下文、不计入 `output_tokens`；不带工具定义的辅助请求（标题生成、压缩等）不追加；暂不支持非流式请求。可用环境变量 `SHOW_SESSION_CREDITS` 覆盖 |
 | `debugLogs` | 否 | `false` | DEBUG 日志开关：`true` 时控制台、日志文件（`logFile`）与 Admin「查看日志」页三处同步输出 DEBUG 级别事件，可在 Admin 设置页热切换（无需重启）并写回 config.json；关闭后停止捕获新的 DEBUG，已捕获的记录保留。注意该开关返回/保存的是开关状态而非实际生效档位：设置 `RUST_LOG` 环境变量时，其指令仍优先（开关仅在 `RUST_LOG` 基础上追加全局 `debug` 指令，target 定向指令不受影响）。日志量会显著增加，排障后建议关闭。可用环境变量 `DEBUG_LOGS` 覆盖 |
 
 > **TLS 说明**：如遇到 Token 刷新失败或请求报错，尝试将 `tlsBackend` 改为 `native-tls`。
@@ -560,6 +561,7 @@ Kiro 上游的 4 个接入端点（`ide` / `runtime` / `codewhisperer` / `amazon
 | Suggestion Mode 输入建议 | `forwardSuggestionMode` | 立即热生效 |
 | 客户端 token 直通 | `clientTokenPassthrough` | 立即热生效 |
 | 思考内容文本化展示 | `thinkingAsText` | 立即热生效，仅影响之后的新请求 |
+| 会话 Credits 汇总行 | `showSessionCredits` | 立即热生效，仅影响之后的新请求 |
 | DEBUG 日志 | `debugLogs` | 立即热生效，控制台 / 日志文件 / 日志页三处一致 |
 | 每账号 RPM 上限 | `maxRpmPerCredential` | 立即热生效，`0` 表示不限 |
 | 分块写入行数上限 | `writeChunkingMaxLines` | 立即热生效，仅影响之后的新请求，`0` 表示不追加约束 |
@@ -977,12 +979,15 @@ MIT
 - [xhsngdsan](https://github.com/xhsngdsan)
 - [zbjincheng](https://github.com/zbjincheng) — [#41](https://github.com/TsinHzl/kiro2cc-proxy/pull/41)
 
-**特别致谢**——以下 Issue 直接推动了关键修复：
+**致谢**——以下 Issue 直接推动了关键修复：
 
-- [jayus71](https://github.com/jayus71) — [#56](https://github.com/TsinHzl/kiro2cc-proxy/issues/56)
+- [NoahNyy](https://github.com/NoahNyy) — [#58](https://github.com/TsinHzl/kiro2cc-proxy/issues/58), [#57](https://github.com/TsinHzl/kiro2cc-proxy/issues/57)
+- [jayus71](https://github.com/jayus71) — [#56](https://github.com/TsinHzl/kiro2cc-proxy/issues/56), [#52](https://github.com/TsinHzl/kiro2cc-proxy/issues/52)
 - [aidenli](https://github.com/aidenli) — [#54](https://github.com/TsinHzl/kiro2cc-proxy/issues/54)
 - [AX10MER](https://github.com/AX10MER) — [#47](https://github.com/TsinHzl/kiro2cc-proxy/issues/47)
 - [C2Y-cyber](https://github.com/C2Y-cyber) — [#46](https://github.com/TsinHzl/kiro2cc-proxy/issues/46)
 - [XiaoZhuiWang](https://github.com/XiaoZhuiWang) — [#40](https://github.com/TsinHzl/kiro2cc-proxy/issues/40)
+- [SunNorthGod](https://github.com/SunNorthGod) — [#9](https://github.com/TsinHzl/kiro2cc-proxy/issues/9), [#8](https://github.com/TsinHzl/kiro2cc-proxy/issues/8)
+- [RecordingTheSmile](https://github.com/RecordingTheSmile) — [#44](https://github.com/TsinHzl/kiro2cc-proxy/issues/44)
 
 > 感谢每一位提交 Issue、反馈建议和参与讨论的用户，是你们让这个项目不断完善。

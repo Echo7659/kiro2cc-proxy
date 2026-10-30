@@ -23,6 +23,7 @@ import { extractErrorMessage } from '@/lib/utils'
 import { copyToClipboard as writeToClipboard } from '@/lib/clipboard'
 import { importToCcSwitch, type CcSwitchApp } from '@/lib/ccswitch'
 import { localeTag } from '@/lib/locale'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 import type { ApiKeyItem, UsageSummary } from '@/types/api'
 import { ApiKeysUsageMetrics } from '@/components/api-keys/usage-metrics'
 import { EXPIRING_SOON_MS, ITEMS_PER_PAGE, formatLocalDate, type KeyStatusFilter, type SortBy } from '@/components/api-keys/panel-constants'
@@ -121,8 +122,8 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
   const usageMap = new Map<number, UsageSummary>()
   usageData?.forEach((u) => usageMap.set(u.apiKeyId, u))
 
-  const handleResetUsage = (key: ApiKeyItem) => {
-    if (!confirm(t('apiKeys.confirmResetUsage', { name: key.name }))) return
+  const handleResetUsage = async (key: ApiKeyItem) => {
+    if (!(await confirmDialog(t('apiKeys.confirmResetUsage', { name: key.name })))) return
     resetUsage(key.id, {
       onSuccess: () => toast.success(t('apiKeys.toastUsageReset')),
       onError: (err) => toast.error(extractErrorMessage(err)),
@@ -267,8 +268,8 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
     )
   }
 
-  const handleDelete = (key: ApiKeyItem) => {
-    if (!confirm(t('apiKeys.confirmDelete', { name: key.name }))) return
+  const handleDelete = async (key: ApiKeyItem) => {
+    if (!(await confirmDialog(t('apiKeys.confirmDelete', { name: key.name })))) return
     deleteKey(key.id, {
       onSuccess: () => toast.success(t('apiKeys.toastDeleted')),
       onError: (err) => toast.error(extractErrorMessage(err)),
@@ -511,17 +512,17 @@ export function ApiKeysPanel({ onViewDetail }: ApiKeysPanelProps) {
     toast.success(t(successKey, { count: done }))
   }
 
-  const handleBatchDisable = () => {
+  const handleBatchDisable = async () => {
     const ids = allKeys.filter((k) => selectedIds.has(k.id) && k.enabled).map((k) => k.id)
     if (ids.length === 0) return
-    if (!confirm(t('apiKeys.confirmBatchDisable', { count: ids.length }))) return
+    if (!(await confirmDialog(t('apiKeys.confirmBatchDisable', { count: ids.length })))) return
     void runBatch(ids, (id) => updateApiKeyApi(id, { enabled: false }), 'apiKeys.toastBatchDisabled')
   }
 
-  const handleBatchResetUsage = () => {
+  const handleBatchResetUsage = async () => {
     const ids = selectedExistingIds
     if (ids.length === 0) return
-    if (!confirm(t('apiKeys.confirmBatchReset', { count: ids.length }))) return
+    if (!(await confirmDialog(t('apiKeys.confirmBatchReset', { count: ids.length })))) return
     void runBatch(ids, resetKeyUsageApi, 'apiKeys.toastBatchReset')
   }
 
